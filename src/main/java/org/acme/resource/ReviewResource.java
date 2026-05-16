@@ -10,6 +10,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.core.MediaType;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -20,63 +21,56 @@ import org.acme.Review;
 @Consumes(MediaType.APPLICATION_JSON)
 public class ReviewResource {
 
-    private static List<Review> reviews = new ArrayList<>();
-    private static int nextId = 3;
-
-    static {
-        reviews.add(new Review(1, "John Smith", 2, "Ignored maintenance requests"));
-        reviews.add(new Review(2, "Sarah Johnson", 5, "Very responsive and fair"));
-    }
-
     @GET
     public List<Review> getReviews() {
-        return reviews;
+        return Review.listAll();
     }
 
     @POST
     public List<Review> addReview(Review review) {
-        if(review != null){
-            review.id = nextId;
-            nextId++;
-            reviews.add(review);
+        if (review != null) {
+            review.createdAt = LocalDateTime.now();
+            review.updatedAt = LocalDateTime.now();
+
+            review.persist();
         }
 
-        return reviews;
+        return Review.listAll();
     }
 
     @GET
     @Path("/{id}")
-    public Review getReviewById(@PathParam("id") int id) {
-        for (Review review : reviews) {
-            if (review.id == id) {
-                return review;
-            }
-        }
-
-        return null;
+    public Review getReviewById(@PathParam("id") Long id) {
+        return Review.findById(id);
     }
 
     @DELETE
     @Path("/{id}")
-    public List<Review> deleteReview(@PathParam("id") int id) {
-        reviews.removeIf(review -> review.id == id);
+    public List<Review> deleteReview(@PathParam("id") Long id) {
+        Review review = Review.findById(id);
 
-        return reviews;
+        if (review != null) {
+            review.delete();
+        }
+
+        return Review.listAll();
     }
 
     @PUT
     @Path("/{id}")
-    public Review updateReview(@PathParam("id") int id, Review updatedReview) {
-        for (Review review : reviews) {
-            if (review.id == id) {
-                review.landlord = updatedReview.landlord;
-                review.rating = updatedReview.rating;
-                review.comment = updatedReview.comment;
+    public Review updateReview(@PathParam("id") Long id, Review updatedReview) {
+        Review review = Review.findById(id);
 
-                return review;
-            }
+        if (review != null) {
+            review.landlord = updatedReview.landlord;
+            review.rating = updatedReview.rating;
+            review.comment = updatedReview.comment;
+
+            review.updatedAt = java.time.LocalDateTime.now();
+
+            review.persist();
         }
 
-        return null;
+        return review;
     }
 }

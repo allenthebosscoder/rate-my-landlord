@@ -1,19 +1,20 @@
 package org.acme;
 
-public class Review {
+import io.quarkus.hibernate.orm.panache.PanacheEntity;
+import jakarta.persistence.Entity;
 
-    public int id;
+import java.time.LocalDateTime;
+
+@Entity
+public class Review extends PanacheEntity {
+
     public String landlord;
+
     public int rating;
+
     public String comment;
 
-    public Review() {
-    }
+    public LocalDateTime createdAt;
 
-    public Review(int id, String landlord, int rating, String comment) {
-        this.id = id;
-        this.landlord = landlord;
-        this.rating = rating;
-        this.comment = comment;
-    }
+    public LocalDateTime updatedAt;
 }
