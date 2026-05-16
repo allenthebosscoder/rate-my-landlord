@@ -2,12 +2,13 @@ package org.acme.resource;
 
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.PathParam;
-import jakarta.ws.rs.DELETE;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -61,5 +62,21 @@ public class ReviewResource {
         reviews.removeIf(review -> review.id == id);
 
         return reviews;
+    }
+
+    @PUT
+    @Path("/{id}")
+    public Review updateReview(@PathParam("id") int id, Review updatedReview) {
+        for (Review review : reviews) {
+            if (review.id == id) {
+                review.landlord = updatedReview.landlord;
+                review.rating = updatedReview.rating;
+                review.comment = updatedReview.comment;
+
+                return review;
+            }
+        }
+
+        return null;
     }
 }
