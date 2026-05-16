@@ -7,6 +7,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.DELETE;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +39,26 @@ public class ReviewResource {
             nextId++;
             reviews.add(review);
         }
+
+        return reviews;
+    }
+
+    @GET
+    @Path("/{id}")
+    public Review getReviewById(@PathParam("id") int id) {
+        for (Review review : reviews) {
+            if (review.id == id) {
+                return review;
+            }
+        }
+
+        return null;
+    }
+
+    @DELETE
+    @Path("/{id}")
+    public List<Review> deleteReview(@PathParam("id") int id) {
+        reviews.removeIf(review -> review.id == id);
 
         return reviews;
     }
