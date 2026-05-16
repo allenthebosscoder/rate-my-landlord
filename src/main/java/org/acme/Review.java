@@ -5,13 +5,21 @@ import jakarta.persistence.Entity;
 
 import java.time.LocalDateTime;
 
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+
 @Entity
 public class Review extends PanacheEntity {
 
+    @NotBlank
     public String landlord;
 
+    @Min(1)
+    @Max(5)
     public int rating;
 
+    @NotBlank
     public String comment;
 
     public LocalDateTime createdAt;
