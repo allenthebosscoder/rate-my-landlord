@@ -10,6 +10,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.validation.Valid;
+import jakarta.transaction.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -28,6 +29,7 @@ public class ReviewResource {
     }
 
     @POST
+    @Transactional
     public List<Review> addReview(@Valid Review review) {
         if (review != null) {
             review.createdAt = LocalDateTime.now();
@@ -47,6 +49,7 @@ public class ReviewResource {
 
     @DELETE
     @Path("/{id}")
+    @Transactional
     public List<Review> deleteReview(@PathParam("id") Long id) {
         Review review = Review.findById(id);
 
@@ -59,6 +62,7 @@ public class ReviewResource {
 
     @PUT
     @Path("/{id}")
+    @Transactional
     public Review updateReview(@PathParam("id") Long id, @Valid Review updatedReview) {
         Review review = Review.findById(id);
 
