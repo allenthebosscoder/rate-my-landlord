@@ -1,13 +1,32 @@
 import type { NextRequest } from "next/server";
 
-export async function GET(request: NextRequest) {
-  const res = await fetch("http://localhost:8080/reviews");
-  const reviews = await res.json();
+export async function GET() {
 
-  return new Response(JSON.stringify(reviews), {
-    status: res.status,
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
+  const response = await fetch(
+    "http://localhost:8080/reviews"
+  );
+
+  const data = await response.json();
+
+  return Response.json(data);
+}
+
+export async function POST(request: NextRequest) {
+
+  const body = await request.json();
+
+  const response = await fetch(
+    "http://localhost:8080/reviews",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  const data = await response.json();
+
+  return Response.json(data);
 }
