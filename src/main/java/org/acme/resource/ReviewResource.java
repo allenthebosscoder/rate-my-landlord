@@ -9,19 +9,23 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.core.MediaType;
-import jakarta.validation.Valid;
+import jakarta.ws.rs.core.Response;
 import jakarta.transaction.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Logger;
 
 import org.acme.Review;
+import org.acme.Property;
+import org.acme.Landlord;
 
 @Path("/reviews")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class ReviewResource {
+    
+    private static final Logger LOG = Logger.getLogger(ReviewResource.class.getName());
 
     @GET
     public List<Review> getReviews() {
@@ -30,15 +34,61 @@ public class ReviewResource {
 
     @POST
     @Transactional
-    public List<Review> addReview(@Valid Review review) {
-        if (review != null) {
+    public Response addReview(Review review) {
+        try {
+            LOG.info("Received review: " + review);
+            
+            if (review == null || review.property == null) {
+                LOG.severe("Review or property is null");
+                return Response.status(Response.Status.BAD_REQUEST).build();
+            }
+
+            // Normalize rating
+            double rounded = Math.round(review.rating * 2.0) / 2.0;
+            if (rounded < 0.5) rounded = 0.5;
+            if (rounded > 5.0) rounded = 5.0;
+            review.rating = rounded;
+
             review.createdAt = LocalDateTime.now();
             review.updatedAt = LocalDateTime.now();
 
-            review.persist();
-        }
+            // Handle landlord
+            Landlord landlord = review.property.landlord;
+            if (landlord != null && landlord.name != null && !landlord.name.isEmpty()) {
+                Landlord existingLandlord = Landlord.find("name", landlord.name).firstResult();
+                if (existingLandlord != null) {
+                    LOG.info("Found existing landlord: " + existingLandlord.id);
+                    landlord = existingLandlord;
+                } else {
+                    LOG.info("Creating new landlord: " + landlord.name);
+                    landlord.persist();
+                }
+                review.property.landlord = landlord;
+            }
 
-        return Review.listAll();
+            // Handle property
+            Property property = review.property;
+            Property existingProperty = Property.find("zipCode = ?1 and landlord = ?2", property.zipCode, landlord).firstResult();
+            if (existingProperty != null) {
+                LOG.info("Found existing property: " + existingProperty.id);
+                property = existingProperty;
+            } else {
+                LOG.info("Creating new property: " + property.zipCode);
+                property.landlord = landlord;
+                property.persist();
+            }
+            review.property = property;
+
+            review.persist();
+            LOG.info("Review created with id: " + review.id);
+            return Response.ok(review).build();
+        } catch (Exception e) {
+            LOG.severe("Error creating review: " + e.getMessage());
+            e.printStackTrace();
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("{\"error\": \"" + e.getMessage() + "\"}")
+                    .build();
+        }
     }
 
     @GET
@@ -50,32 +100,34 @@ public class ReviewResource {
     @DELETE
     @Path("/{id}")
     @Transactional
-    public List<Review> deleteReview(@PathParam("id") Long id) {
+    public Review deleteReview(@PathParam("id") Long id) {
         Review review = Review.findById(id);
 
         if (review != null) {
             review.delete();
         }
 
-        return Review.listAll();
+        return review;
     }
 
     @PUT
     @Path("/{id}")
     @Transactional
-    public Review updateReview(@PathParam("id") Long id, @Valid Review updatedReview) {
+    public Review updateReview(@PathParam("id") Long id, Review updatedReview) {
         Review review = Review.findById(id);
 
         if (review != null) {
-            review.landlord = updatedReview.landlord;
-            review.rating = updatedReview.rating;
+            double rounded = Math.round(updatedReview.rating * 2.0) / 2.0;
+            if (rounded < 0.5) rounded = 0.5;
+            if (rounded > 5.0) rounded = 5.0;
+            review.rating = rounded;
             review.comment = updatedReview.comment;
-
-            review.updatedAt = java.time.LocalDateTime.now();
-
+            review.updatedAt = LocalDateTime.now();
             review.persist();
         }
 
         return review;
     }
 }
+
+
