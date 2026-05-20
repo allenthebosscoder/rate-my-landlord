@@ -5,12 +5,21 @@ import { useEffect, useState } from "react";
 
 type Review = {
   id: number;
-  landlord: string;
   rating: number;
   comment: string;
-  city?: string;
-  state?: string;
-  country?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  property?: {
+    id: number;
+    zipCode: string;
+    city?: string;
+    state?: string;
+    country?: string;
+    landlord?: {
+      id: number;
+      name: string;
+    };
+  };
 };
 
 type Page = "view" | "add";
@@ -20,7 +29,8 @@ export default function Home() {
   
   const [reviews, setReviews] = useState<Review[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [landlord, setLandlord] = useState("");
+  const [landlordName, setLandlordName] = useState("");
+  const [zipCode, setZipCode] = useState("");
   const [rating, setRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
   const [hasSelected, setHasSelected] = useState(false);
@@ -52,8 +62,15 @@ export default function Home() {
         return;
       }
       const data = JSON.parse(text);
-      console.log(data);
-      setReviews(data);
+      console.log("Parsed reviews:", data);
+      if (Array.isArray(data)) {
+        setReviews(data);
+      } else if (data.data && Array.isArray(data.data)) {
+        setReviews(data.data);
+      } else {
+        console.error("Unexpected response format:", data);
+        setReviews([]);
+      }
     } catch (err) {
       console.error("Failed to load reviews:", err);
       setReviews([]);
@@ -131,8 +148,11 @@ export default function Home() {
     // Collect all validation errors
     const errors: string[] = [];
     
-    if (!landlord.trim()) {
+    if (!landlordName.trim()) {
       errors.push("Landlord name");
+    }
+    if (!zipCode.trim()) {
+      errors.push("Zip code");
     }
     if (!country.trim()) {
       errors.push("Country");
@@ -148,47 +168,69 @@ export default function Home() {
 
     setError("");
 
-    if (editingId !== null) {
-      await fetch(`/api/reviews/${editingId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
+    const reviewData: any = {
+      rating,
+      comment,
+      property: {
+        zipCode,
+        city,
+        state,
+        country,
+        landlord: {
+          name: landlordName,
         },
-        body: JSON.stringify({
-          landlord,
-          rating,
-          comment,
-          city,
-          state,
-          country,
-        }),
-      });
+      },
+    };
 
-      setEditingId(null);
-    } else {
-      await fetch("/api/reviews", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          landlord,
-          rating,
-          comment,
-          city,
-          state,
-          country,
-        }),
-      });
+    try {
+      if (editingId !== null) {
+        const response = await fetch(`/api/reviews/${editingId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(reviewData),
+        });
+        console.log("Update response:", response.status);
+        setEditingId(null);
+      } else {
+        const response = await fetch("/api/reviews", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(reviewData),
+        });
+        console.log("Create response status:", response.status);
+        console.log("Create response ok:", response.ok);
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error("API error response status:", response.status);
+          console.error("API error response body:", errorText);
+          setError(`Failed to submit review (Status: ${response.status})`);
+          return;
+        }
+        const responseData = await response.json();
+        console.log("Response data:", responseData);
+      }
+
+      setLandlordName("");
+      setZipCode("");
+      setRating(0);
+      setComment("");
+      setCity("");
+      setState("");
+      setCountry("");
+      
+      // Give the backend a moment to process, then reload
+      setTimeout(() => {
+        loadReviews();
+      }, 500);
+    } catch (err) {
+      console.error("Error submitting review:", err);
+      setError("Error submitting review. Check console for details.");
     }
-
-    setLandlord("");
-    setRating(0);
-    setComment("");
-    setCity("");
-    setState("");
-    setCountry("");
-    loadReviews();
   }
 
   async function deleteReview(id: number) {
@@ -238,14 +280,18 @@ export default function Home() {
               className="border p-4 rounded-lg"
             >
               <h2 className="text-2xl font-semibold">
-                {review.landlord}
+                {review.property?.landlord?.name}
               </h2>
 
-              <p className="text-sm text-gray-600">
-                {[review.city, review.state, review.country].filter(Boolean).join(", ")}
+              <p className="text-sm text-gray-600 mb-2">
+                Property: {review.property?.zipCode}
               </p>
 
-              <p>
+              <p className="text-sm text-gray-600">
+                {[review.property?.city, review.property?.state, review.property?.country].filter(Boolean).join(", ")}
+              </p>
+
+              <p className="mt-2">
                 Rating: {review.rating}/5
               </p>
 
@@ -263,12 +309,13 @@ export default function Home() {
               <button
                 onClick={() => {
                   setEditingId(review.id);
-                  setLandlord(review.landlord);
+                  setLandlordName(review.property?.landlord?.name || "");
+                  setZipCode(review.property?.zipCode || "");
                   setRating(review.rating);
                   setComment(review.comment);
-                  setCity(review.city || "");
-                  setState(review.state || "");
-                  setCountry(review.country || "");
+                  setCity(review.property?.city || "");
+                  setState(review.property?.state || "");
+                  setCountry(review.property?.country || "");
                   setCurrentPage("add");
                 }}
                 className="bg-blue-500 text-white px-3 py-1 rounded mt-3 ml-2"
@@ -299,8 +346,8 @@ export default function Home() {
             <input
               type="text"
               placeholder="Landlord name"
-              value={landlord}
-              onChange={(e) => setLandlord(e.target.value)}
+              value={landlordName}
+              onChange={(e) => setLandlordName(e.target.value)}
               className="border p-2 w-full rounded"
             />
           </div>
@@ -375,6 +422,19 @@ export default function Home() {
               </select>
             </div>
           )}
+
+          <div>
+            <label className="block text-sm font-medium mb-1">
+              Zip Code <span className="text-red-600">*</span>
+            </label>
+            <input
+              type="text"
+              placeholder="Zip code"
+              value={zipCode}
+              onChange={(e) => setZipCode(e.target.value)}
+              className="border p-2 w-full rounded"
+            />
+          </div>
 
           <div>
             <label className="block text-sm font-medium mb-1">
@@ -464,7 +524,8 @@ export default function Home() {
                 type="button"
                 onClick={() => {
                   setEditingId(null);
-                  setLandlord("");
+                  setLandlordName("");
+                  setZipCode("");
                   setRating(0);
                   setComment("");
                   setCity("");
