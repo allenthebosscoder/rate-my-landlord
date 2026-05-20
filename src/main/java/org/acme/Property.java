@@ -9,6 +9,7 @@ import jakarta.persistence.OneToMany;
 import jakarta.validation.constraints.NotBlank;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.List;
+import java.util.ArrayList;
 
 @Entity
 public class Property extends PanacheEntity {
@@ -28,6 +29,6 @@ public class Property extends PanacheEntity {
 
     @OneToMany(mappedBy = "property", cascade = CascadeType.ALL, orphanRemoval = true)
     @JsonIgnore
-    public List<Review> reviews;
+    public List<Review> reviews = new ArrayList<>();
 }
 

@@ -7,6 +7,7 @@ import jakarta.persistence.OneToMany;
 import jakarta.validation.constraints.NotBlank;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.List;
+import java.util.ArrayList;
 
 @Entity
 public class Landlord extends PanacheEntity {
@@ -16,6 +17,6 @@ public class Landlord extends PanacheEntity {
 
     @OneToMany(mappedBy = "landlord", cascade = CascadeType.ALL, orphanRemoval = true)
     @JsonIgnore
-    public List<Property> properties;
+    public List<Property> properties = new ArrayList<>();
 }
 

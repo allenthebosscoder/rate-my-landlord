@@ -40,7 +40,16 @@ public class ReviewResource {
             
             if (review == null || review.property == null) {
                 LOG.severe("Review or property is null");
-                return Response.status(Response.Status.BAD_REQUEST).build();
+                return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("{\"error\": \"Review or property is required\"}")
+                    .build();
+            }
+
+            if (review.property.landlord == null || review.property.landlord.name == null || review.property.landlord.name.isEmpty()) {
+                LOG.severe("Landlord name is required");
+                return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("{\"error\": \"Landlord name is required\"}")
+                    .build();
             }
 
             // Normalize rating
@@ -52,33 +61,40 @@ public class ReviewResource {
             review.createdAt = LocalDateTime.now();
             review.updatedAt = LocalDateTime.now();
 
-            // Handle landlord
-            Landlord landlord = review.property.landlord;
-            if (landlord != null && landlord.name != null && !landlord.name.isEmpty()) {
-                Landlord existingLandlord = Landlord.find("name", landlord.name).firstResult();
-                if (existingLandlord != null) {
-                    LOG.info("Found existing landlord: " + existingLandlord.id);
-                    landlord = existingLandlord;
-                } else {
-                    LOG.info("Creating new landlord: " + landlord.name);
-                    landlord.persist();
-                }
-                review.property.landlord = landlord;
-            }
-
-            // Handle property
-            Property property = review.property;
-            Property existingProperty = Property.find("zipCode = ?1 and landlord = ?2", property.zipCode, landlord).firstResult();
-            if (existingProperty != null) {
-                LOG.info("Found existing property: " + existingProperty.id);
-                property = existingProperty;
+            // Find or create landlord
+            String landlordName = review.property.landlord.name.trim();
+            Landlord existingLandlord = Landlord.find("name", landlordName).firstResult();
+            
+            if (existingLandlord == null) {
+                LOG.info("Creating new landlord: " + landlordName);
+                Landlord newLandlord = new Landlord();
+                newLandlord.name = landlordName;
+                newLandlord.persist();
+                existingLandlord = newLandlord;
             } else {
-                LOG.info("Creating new property: " + property.zipCode);
-                property.landlord = landlord;
-                property.persist();
+                LOG.info("Found existing landlord: " + existingLandlord.id);
             }
-            review.property = property;
 
+            // Find or create property
+            String zipCode = review.property.zipCode.trim();
+            Property existingProperty = Property.find("zipCode = ?1 and landlord = ?2", zipCode, existingLandlord).firstResult();
+            
+            if (existingProperty == null) {
+                LOG.info("Creating new property: " + zipCode);
+                Property newProperty = new Property();
+                newProperty.zipCode = zipCode;
+                newProperty.city = review.property.city;
+                newProperty.state = review.property.state;
+                newProperty.country = review.property.country;
+                newProperty.landlord = existingLandlord;
+                newProperty.persist();
+                existingProperty = newProperty;
+            } else {
+                LOG.info("Found existing property: " + existingProperty.id);
+            }
+
+            // Create the review
+            review.property = existingProperty;
             review.persist();
             LOG.info("Review created with id: " + review.id);
             return Response.ok(review).build();
