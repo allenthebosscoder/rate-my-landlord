@@ -138,10 +138,50 @@ public class ReviewResource {
             if (rounded > 5.0) rounded = 5.0;
             review.rating = rounded;
             review.comment = updatedReview.comment;
+            review.tenantName = updatedReview.tenantName;
+            review.tenantLocation = updatedReview.tenantLocation;
+            review.tenure = updatedReview.tenure;
+            review.categories = updatedReview.categories;
             review.updatedAt = LocalDateTime.now();
             review.persist();
         }
 
+        return review;
+    }
+
+    @POST
+    @Path("/{id}/helpful")
+    @Transactional
+    public Review markHelpful(@PathParam("id") Long id) {
+        Review review = Review.findById(id);
+        if (review != null) {
+            review.helpfulCount++;
+            review.persist();
+        }
+        return review;
+    }
+
+    @POST
+    @Path("/{id}/unhelpful")
+    @Transactional
+    public Review markUnhelpful(@PathParam("id") Long id) {
+        Review review = Review.findById(id);
+        if (review != null) {
+            review.unhelpfulCount++;
+            review.persist();
+        }
+        return review;
+    }
+
+    @POST
+    @Path("/{id}/report")
+    @Transactional
+    public Review reportReview(@PathParam("id") Long id) {
+        Review review = Review.findById(id);
+        if (review != null) {
+            review.isReported = true;
+            review.persist();
+        }
         return review;
     }
 }
