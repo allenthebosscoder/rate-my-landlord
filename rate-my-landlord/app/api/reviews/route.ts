@@ -1,9 +1,14 @@
 import type { NextRequest } from "next/server";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const response = await fetch(
-      "http://localhost:8080/reviews"
+      "http://localhost:8080/reviews",
+      {
+        headers: {
+          Authorization: request.headers.get("Authorization") ?? "",
+        },
+      }
     );
 
     if (!response.ok) {
@@ -36,6 +41,7 @@ export async function POST(request: NextRequest) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: request.headers.get("Authorization") ?? "",
         },
         body: JSON.stringify(body),
       }

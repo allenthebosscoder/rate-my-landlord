@@ -1,21 +1,27 @@
 "use client";
 
-import { Star, ThumbsUp, ThumbsDown, Flag, Share2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Star, ThumbsUp, ThumbsDown, Flag, Share2, MoreVertical, Pencil, Trash2, EyeOff } from "lucide-react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 type Review = {
   id: number;
   rating: number;
   comment: string;
   tenantName: string;
+  showName?: boolean;
   tenantLocation: string;
   tenure: string;
   categories: string;
   helpfulCount: number;
   unhelpfulCount: number;
+  myVote?: "HELPFUL" | "UNHELPFUL" | null;
   isReported: boolean;
   createdAt?: string;
   updatedAt?: string;
+  owner?: {
+    id: number;
+    username: string;
+  };
   property?: {
     id: number;
     zipCode: string;
@@ -29,7 +35,70 @@ type Review = {
   };
 };
 
-type Page = "view" | "add";
+type Page = "view" | "add" | "auth";
+
+type Auth = { token: string; username: string } | null;
+
+const AUTH_TOKEN_KEY = "rml_token";
+const AUTH_USERNAME_KEY = "rml_username";
+const authListeners = new Set<() => void>();
+let cachedAuth: Auth | undefined;
+
+function readAuthFromStorage(): Auth {
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  const username = localStorage.getItem(AUTH_USERNAME_KEY);
+  return token && username ? { token, username } : null;
+}
+
+function getAuthSnapshot(): Auth {
+  if (cachedAuth === undefined) {
+    cachedAuth = readAuthFromStorage();
+  }
+  return cachedAuth;
+}
+
+function getServerAuthSnapshot(): Auth {
+  return null;
+}
+
+function subscribeAuth(callback: () => void) {
+  authListeners.add(callback);
+  return () => {
+    authListeners.delete(callback);
+  };
+}
+
+function setAuth(auth: Auth) {
+  if (auth) {
+    localStorage.setItem(AUTH_TOKEN_KEY, auth.token);
+    localStorage.setItem(AUTH_USERNAME_KEY, auth.username);
+  } else {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_USERNAME_KEY);
+  }
+  cachedAuth = auth;
+  authListeners.forEach((listener) => listener());
+}
+
+type Country = { country: string };
+type StateOption = { name: string };
+
+type NewReviewPayload = {
+  rating: number;
+  comment: string;
+  tenantName: string;
+  showName: boolean;
+  tenantLocation: string;
+  tenure: string;
+  categories: string;
+  property: {
+    zipCode: string;
+    city: string;
+    state: string;
+    country: string;
+    landlord: { name: string };
+  };
+};
 
 const CATEGORY_OPTIONS = [
   "All Reviews",
@@ -38,14 +107,6 @@ const CATEGORY_OPTIONS = [
   "Maintenance",
   "Value",
 ];
-
-const STAR_COLORS: { [key: number]: string } = {
-  5: "text-green-500",
-  4: "text-blue-500",
-  3: "text-yellow-500",
-  2: "text-orange-500",
-  1: "text-red-500",
-};
 
 function getInitials(name: string): string {
   return name
@@ -67,11 +128,74 @@ function getInitialsColor(name: string): string {
   return colors[name.charCodeAt(0) % colors.length];
 }
 
+type SortOption = "relevance" | "recent" | "helpful" | "highest" | "lowest";
+
+const SORT_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: "relevance", label: "Sort by: Relevance" },
+  { value: "recent", label: "Sort by: Most Recent" },
+  { value: "helpful", label: "Sort by: Most Helpful" },
+  { value: "highest", label: "Sort by: Highest Rating" },
+  { value: "lowest", label: "Sort by: Lowest Rating" },
+];
+
+// Combines net votes with a gentle time decay so relevance considers both how
+// helpful a review is and how recent it is. Same shape as the Hacker News /
+// Reddit "hot" ranking (score decayed by a power of age), but tuned for a much
+// slower shelf life: those algorithms decay over hours since a news post is
+// stale within a day, while a landlord review is still useful for months, so
+// the exponent here is far gentler and age is measured in days, not hours.
+function relevanceScore(review: Review): number {
+  const netVotes = review.helpfulCount - review.unhelpfulCount;
+  const ageInDays = review.createdAt
+    ? Math.max(0, (Date.now() - new Date(review.createdAt).getTime()) / 86_400_000)
+    : 0;
+  return (netVotes + 1) / Math.pow(ageInDays + 2, 0.3);
+}
+
+function sortReviews(list: Review[], sortBy: SortOption): Review[] {
+  const sorted = [...list];
+  switch (sortBy) {
+    case "recent":
+      sorted.sort(
+        (a, b) => new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime()
+      );
+      break;
+    case "helpful":
+      sorted.sort((a, b) => b.helpfulCount - a.helpfulCount);
+      break;
+    case "highest":
+      sorted.sort((a, b) => b.rating - a.rating);
+      break;
+    case "lowest":
+      sorted.sort((a, b) => a.rating - b.rating);
+      break;
+    case "relevance":
+    default:
+      sorted.sort((a, b) => relevanceScore(b) - relevanceScore(a));
+      break;
+  }
+  return sorted;
+}
+
 export default function Home() {
+  const auth = useSyncExternalStore(subscribeAuth, getAuthSnapshot, getServerAuthSnapshot);
+  const token = auth?.token ?? null;
+  const username = auth?.username ?? null;
+
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
   const [currentPage, setCurrentPage] = useState<Page>("view");
   const [selectedLandlord, setSelectedLandlord] = useState<string | null>(null);
   const [selectedRating, setSelectedRating] = useState<number | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>("All Reviews");
+  const [sortBy, setSortBy] = useState<SortOption>("relevance");
+  const orderSignatureRef = useRef<string | null>(null);
+  const [orderedIds, setOrderedIds] = useState<number[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const [reviews, setReviews] = useState<Review[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -79,8 +203,6 @@ export default function Home() {
   const [zipCode, setZipCode] = useState("");
   const [rating, setRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
-  const [hasSelected, setHasSelected] = useState(false);
-  const [isHoveringStars, setIsHoveringStars] = useState(false);
   const [comment, setComment] = useState("");
   const [city, setCity] = useState("");
   const [state, setState] = useState("");
@@ -89,16 +211,30 @@ export default function Home() {
   const [tenantLocation, setTenantLocationForm] = useState("");
   const [tenure, setTenure] = useState("");
   const [categories, setFormCategories] = useState<string[]>([]);
+  const [showName, setShowName] = useState(true);
   const [error, setError] = useState("");
 
-  const [countries, setCountries] = useState<any[]>([]);
-  const [states, setStates] = useState<any[]>([]);
-  const [cities, setCities] = useState<any[]>([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 2500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const [countries, setCountries] = useState<Country[]>([]);
+  const [states, setStates] = useState<StateOption[]>([]);
+  const [cities, setCities] = useState<string[]>([]);
   const [loadingLocations, setLoadingLocations] = useState(false);
 
-  async function loadReviews() {
+  async function loadReviews(overrideToken?: string | null) {
+    const authToken = overrideToken !== undefined ? overrideToken : token;
     try {
-      const response = await fetch("/api/reviews");
+      const response = await fetch("/api/reviews", {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      });
       if (!response.ok) {
         console.error("API error:", response.status, response.statusText);
         setReviews([]);
@@ -182,12 +318,38 @@ export default function Home() {
   }
 
   useEffect(() => {
+    // Initial data load on mount; loadReviews/loadCountries only touch state
+    // after their fetch resolves, so this isn't a synchronous setState-in-effect.
+    // Intentionally run once on mount only — loadReviews is redefined every
+    // render (it closes over `token`), so depending on it would refetch on
+    // every render instead of just once.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadReviews();
     loadCountries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function handleAuthFailure(status: number): boolean {
+    if (status === 401) {
+      setAuth(null);
+      setError("Your session has expired. Please sign in again.");
+      setCurrentPage("auth");
+      return true;
+    }
+    if (status === 403) {
+      setError("You can only edit your own reviews.");
+      return true;
+    }
+    return false;
+  }
 
   async function submitReview(e: React.FormEvent) {
     e.preventDefault();
+
+    if (!token) {
+      setCurrentPage("auth");
+      return;
+    }
 
     const errors: string[] = [];
     if (!landlordName.trim()) errors.push("Landlord name");
@@ -203,10 +365,11 @@ export default function Home() {
 
     setError("");
 
-    const reviewData: any = {
+    const reviewData: NewReviewPayload = {
       rating,
       comment,
       tenantName,
+      showName,
       tenantLocation,
       tenure,
       categories: categories.join(","),
@@ -225,24 +388,35 @@ export default function Home() {
       if (editingId !== null) {
         const response = await fetch(`/api/reviews/${editingId}`, {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
           body: JSON.stringify(reviewData),
         });
         if (!response.ok) {
-          setError(`Failed to update review`);
+          if (!handleAuthFailure(response.status)) {
+            setError("Failed to update review");
+          }
           return;
         }
         setEditingId(null);
       } else {
         const response = await fetch("/api/reviews", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
           body: JSON.stringify(reviewData),
         });
 
         if (!response.ok) {
           const errorText = await response.text();
-          setError(`Failed to submit review (Status: ${response.status})`);
+          console.error("Failed to submit review:", response.status, errorText);
+          if (!handleAuthFailure(response.status)) {
+            setError(`Failed to submit review (Status: ${response.status})`);
+          }
           return;
         }
       }
@@ -257,6 +431,7 @@ export default function Home() {
       setTenantName("");
       setTenantLocationForm("");
       setTenure("");
+      setShowName(true);
       setFormCategories([]);
 
       setTimeout(() => {
@@ -268,48 +443,211 @@ export default function Home() {
     }
   }
 
-  async function deleteReview(id: number) {
-    await fetch(`/api/reviews/${id}`, {
+  async function confirmDelete(id: number) {
+    if (!token) {
+      setCurrentPage("auth");
+      return;
+    }
+    const response = await fetch(`/api/reviews/${id}`, {
       method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
     });
+    setConfirmDeleteId(null);
+    if (!response.ok) {
+      handleAuthFailure(response.status);
+      return;
+    }
     loadReviews();
   }
 
+  function requireSignIn(message: string): boolean {
+    if (!token) {
+      setToast(message);
+      return false;
+    }
+    return true;
+  }
+
+  function handleVoteFailure(status: number) {
+    if (status === 401) {
+      setAuth(null);
+      setToast("Your session expired. Please sign in again.");
+      loadReviews(null);
+    } else {
+      setToast("Something went wrong. Please try again.");
+    }
+  }
+
   async function markHelpful(id: number) {
-    await fetch(`/api/reviews/${id}/helpful`, {
+    if (!requireSignIn("Sign in to vote on a review")) return;
+    const response = await fetch(`/api/reviews/${id}/helpful`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
     });
+    if (!response.ok) {
+      handleVoteFailure(response.status);
+      return;
+    }
     loadReviews();
   }
 
   async function markUnhelpful(id: number) {
-    await fetch(`/api/reviews/${id}/unhelpful`, {
+    if (!requireSignIn("Sign in to vote on a review")) return;
+    const response = await fetch(`/api/reviews/${id}/unhelpful`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
     });
+    if (!response.ok) {
+      handleVoteFailure(response.status);
+      return;
+    }
     loadReviews();
   }
 
   async function reportReview(id: number) {
-    await fetch(`/api/reviews/${id}/report`, {
+    if (!requireSignIn("Sign in to report a review")) return;
+    const response = await fetch(`/api/reviews/${id}/report`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
     });
+    setOpenMenuId(null);
+    if (!response.ok) {
+      handleVoteFailure(response.status);
+      return;
+    }
     loadReviews();
+  }
+
+  async function seedDevReviews() {
+    await fetch("/api/dev/seed?count=30", { method: "POST" });
+    loadReviews();
+  }
+
+  function goHome() {
+    setCurrentPage("view");
+    setSelectedLandlord(null);
+    setEditingId(null);
+    setSearchQuery("");
+    setError("");
+  }
+
+  async function submitAuth(e: React.FormEvent) {
+    e.preventDefault();
+
+    if (!authUsername.trim() || !authPassword) {
+      setAuthError("Username and password are required");
+      return;
+    }
+    if (authMode === "register" && authPassword.length < 8) {
+      setAuthError("Password must be at least 8 characters");
+      return;
+    }
+
+    setAuthError("");
+    setAuthLoading(true);
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: authUsername.trim(), password: authPassword }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setAuthError(data?.error || "Something went wrong. Please try again.");
+        return;
+      }
+
+      setAuth({ token: data.token, username: data.username });
+      setAuthUsername("");
+      setAuthPassword("");
+      goHome();
+      loadReviews(data.token);
+    } catch (err) {
+      console.error("Auth error:", err);
+      setAuthError("Network error. Please try again.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function logOut() {
+    if (token) {
+      fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch((err) => console.error("Logout error:", err));
+    }
+    setAuth(null);
+    goHome();
+    loadReviews(null);
   }
 
   const landlords = Array.from(
     new Map(
-      (reviews || []).map((r) => [r.property?.landlord?.id, r.property?.landlord?.name])
-    ).entries()
-  ).map(([id, name]) => name);
+      (reviews || [])
+        .filter((r) => r.property?.landlord?.name)
+        .map((r) => [r.property!.landlord!.id, r.property!.landlord!.name])
+    ).values()
+  );
+
+  const searchedLandlords = (() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return landlords;
+    return landlords.filter((landlord) => {
+      if (landlord.toLowerCase().includes(query)) return true;
+      return (reviews || []).some(
+        (r) =>
+          r.property?.landlord?.name === landlord &&
+          [r.property?.city, r.property?.state, r.property?.country, r.property?.zipCode].some(
+            (field) => field?.toLowerCase().includes(query)
+          )
+      );
+    });
+  })();
 
   const filteredReviews = (reviews || [])
     .filter((r) => !selectedLandlord || r.property?.landlord?.name === selectedLandlord)
-    .filter((r) => !selectedRating || r.rating === selectedRating)
+    .filter((r) => !selectedRating || Math.round(r.rating) === selectedRating)
     .filter((r) => {
       if (selectedCategory === "All Reviews") return true;
       const cats = r.categories?.split(",").map((c) => c.trim()) || [];
       return cats.includes(selectedCategory);
     });
+
+  // Display order is intentionally "frozen": it's only recomputed when the
+  // user explicitly changes sort/filter/landlord (orderSignature changes).
+  // Background refreshes (e.g. after voting) update counts in place without
+  // visibly reshuffling the list — jumping reviews around on every vote is
+  // confusing. Newly-created reviews that weren't part of the frozen order
+  // get appended, sorted among themselves, rather than forcing a full resort.
+  const orderSignature = `${selectedLandlord ?? ""}|${selectedRating ?? ""}|${selectedCategory}|${sortBy}`;
+
+  useEffect(() => {
+    // The ref read/write lives directly in the effect body, not inside the
+    // setState updater — updater functions must be pure (React may invoke
+    // them more than once to check that), so mutating a ref inside one is
+    // unreliable and was the cause of sort changes not taking effect.
+    const isNewView = orderSignatureRef.current !== orderSignature;
+    orderSignatureRef.current = orderSignature;
+
+    if (isNewView) {
+      setOrderedIds(sortReviews(filteredReviews, sortBy).map((r) => r.id));
+    } else {
+      setOrderedIds((prevIds) => {
+        const knownIds = new Set(prevIds);
+        const newReviews = filteredReviews.filter((r) => !knownIds.has(r.id));
+        if (newReviews.length === 0) return prevIds;
+        return [...prevIds, ...sortReviews(newReviews, sortBy).map((r) => r.id)];
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderSignature, reviews]);
+
+  const filteredReviewsById = new Map(filteredReviews.map((r) => [r.id, r]));
+  const displayedReviews = orderedIds
+    .map((id) => filteredReviewsById.get(id))
+    .filter((r): r is Review => Boolean(r));
 
   const ratingDistribution = () => {
     const dist: { [key: number]: number } = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
@@ -337,18 +675,38 @@ export default function Home() {
       <nav className="bg-white border-b">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-8">
-            <h1 className="text-2xl font-bold text-blue-600">RateMyLandlord</h1>
+            <button
+              onClick={goHome}
+              className="text-2xl font-bold text-blue-600 hover:text-blue-700 transition-colors"
+            >
+              RateMyLandlord
+            </button>
             <div className="hidden md:flex gap-6">
               <input
                 type="text"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setSelectedLandlord(null);
+                  setCurrentPage("view");
+                }}
                 placeholder="Search for a landlord, property management company, or location..."
                 className="px-4 py-2 border rounded-lg w-96 text-sm"
               />
             </div>
           </div>
-          <div className="flex gap-4">
+          <div className="flex items-center gap-4">
             <button
               onClick={() => {
+                if (!username) {
+                  setAuthMode("login");
+                  setCurrentPage("auth");
+                  return;
+                }
+                if (!tenantName.trim()) {
+                  setTenantName(username);
+                }
+                setError("");
                 setCurrentPage("add");
                 setSelectedLandlord(null);
               }}
@@ -356,9 +714,38 @@ export default function Home() {
             >
               Write a Review
             </button>
-            <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-              Sign Up
-            </button>
+            {process.env.NODE_ENV === "development" && (
+              <button
+                onClick={seedDevReviews}
+                title="Dev only: generate random test reviews"
+                className="px-3 py-2 text-xs border border-dashed border-gray-400 text-gray-500 rounded-lg hover:bg-gray-50"
+              >
+                🎲 Seed Reviews
+              </button>
+            )}
+            {username ? (
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-gray-700">
+                  Signed in as <span className="font-medium">{username}</span>
+                </span>
+                <button
+                  onClick={logOut}
+                  className="px-4 py-2 border rounded-lg hover:bg-gray-50 text-sm"
+                >
+                  Log Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setAuthMode("login");
+                  setCurrentPage("auth");
+                }}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                Sign In
+              </button>
+            )}
           </div>
         </div>
       </nav>
@@ -472,8 +859,13 @@ export default function Home() {
               {!selectedLandlord && landlords.length > 0 && (
                 <div className="bg-white rounded-lg border p-6">
                   <h3 className="font-bold mb-4">Select a Landlord</h3>
+                  {searchedLandlords.length === 0 && (
+                    <p className="text-sm text-gray-600">
+                      No landlords match &quot;{searchQuery}&quot;.
+                    </p>
+                  )}
                   <div className="space-y-2">
-                    {landlords.map((landlord) => {
+                    {searchedLandlords.map((landlord) => {
                       const landlordReviews = reviews?.filter(
                         (r) => r.property?.landlord?.name === landlord
                       ) || [];
@@ -531,11 +923,16 @@ export default function Home() {
                   {/* Reviews Header */}
                   <div className="flex items-center justify-between mb-6">
                     <h2 className="text-2xl font-bold">Reviews ({filteredReviews.length})</h2>
-                    <select className="px-3 py-2 border rounded-lg text-sm">
-                      <option>Sort by: Most Recent</option>
-                      <option>Sort by: Most Helpful</option>
-                      <option>Sort by: Highest Rating</option>
-                      <option>Sort by: Lowest Rating</option>
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value as SortOption)}
+                      className="px-3 py-2 border rounded-lg text-sm"
+                    >
+                      {SORT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -558,20 +955,33 @@ export default function Home() {
 
                   {/* Reviews List */}
                   <div className="space-y-4">
-                    {filteredReviews.map((review) => (
+                    {displayedReviews.map((review) => (
                       <div key={review.id} className="bg-white rounded-lg border p-6">
                         {/* Review Header */}
                         <div className="flex items-start justify-between mb-3">
                           <div className="flex gap-4">
                             <div
-                              className={`w-12 h-12 rounded-full ${getInitialsColor(
-                                review.tenantName
-                              )} flex items-center justify-center text-white font-bold text-sm flex-shrink-0`}
+                              className={`w-12 h-12 rounded-full ${
+                                review.showName === false
+                                  ? "bg-gray-400"
+                                  : getInitialsColor(review.tenantName)
+                              } flex items-center justify-center text-white font-bold text-sm flex-shrink-0`}
                             >
-                              {getInitials(review.tenantName)}
+                              {review.showName === false ? (
+                                <EyeOff size={18} />
+                              ) : (
+                                getInitials(review.tenantName)
+                              )}
                             </div>
                             <div>
-                              <p className="font-semibold">{review.tenantName}</p>
+                              <p className="font-semibold flex items-center gap-2">
+                                {review.showName === false ? "Anonymous" : review.tenantName}
+                                {review.showName === false && (
+                                  <span className="text-xs font-normal text-gray-500">
+                                    (name hidden)
+                                  </span>
+                                )}
+                              </p>
                               <p className="text-sm text-gray-600">
                                 Tenant {review.tenure && `• ${review.tenure}`}
                               </p>
@@ -586,11 +996,11 @@ export default function Home() {
                                 <Star
                                   key={i}
                                   size={16}
-                                  className={`${
+                                  className={
                                     i < Math.round(review.rating)
-                                      ? `fill-yellow-400 ${STAR_COLORS[Math.round(review.rating)]}`
+                                      ? "fill-yellow-400 text-yellow-400"
                                       : "text-gray-300"
-                                  }`}
+                                  }
                                 />
                               ))}
                             </div>
@@ -609,7 +1019,7 @@ export default function Home() {
                             {review.categories.split(",").map((cat) => (
                               <span
                                 key={cat}
-                                className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded"
+                                className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded"
                               >
                                 {cat.trim()}
                               </span>
@@ -622,60 +1032,103 @@ export default function Home() {
                           <div className="flex gap-4">
                             <button
                               onClick={() => markHelpful(review.id)}
-                              className="flex items-center gap-2 text-sm text-gray-600 hover:text-green-600 transition-colors"
+                              className={`flex items-center gap-2 text-sm transition-colors ${
+                                review.myVote === "HELPFUL"
+                                  ? "text-green-600 font-medium"
+                                  : "text-gray-600 hover:text-green-600"
+                              }`}
                             >
-                              <ThumbsUp size={16} />
+                              <ThumbsUp
+                                size={16}
+                                fill={review.myVote === "HELPFUL" ? "currentColor" : "none"}
+                              />
                               <span>{review.helpfulCount}</span>
                             </button>
                             <button
                               onClick={() => markUnhelpful(review.id)}
-                              className="flex items-center gap-2 text-sm text-gray-600 hover:text-red-600 transition-colors"
-                            >
-                              <ThumbsDown size={16} />
-                              <span>{review.unhelpfulCount}</span>
-                            </button>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => reportReview(review.id)}
-                              className={`flex items-center gap-1 text-sm transition-colors ${
-                                review.isReported
-                                  ? "text-red-600"
+                              className={`flex items-center gap-2 text-sm transition-colors ${
+                                review.myVote === "UNHELPFUL"
+                                  ? "text-red-600 font-medium"
                                   : "text-gray-600 hover:text-red-600"
                               }`}
                             >
-                              <Flag size={16} />
+                              <ThumbsDown
+                                size={16}
+                                fill={review.myVote === "UNHELPFUL" ? "currentColor" : "none"}
+                              />
+                              <span>{review.unhelpfulCount}</span>
                             </button>
-                            {editingId !== review.id && (
+                          </div>
+                          <div className="relative">
+                            <button
+                              onClick={() =>
+                                setOpenMenuId(openMenuId === review.id ? null : review.id)
+                              }
+                              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+                              aria-label="More actions"
+                            >
+                              <MoreVertical size={18} />
+                            </button>
+
+                            {openMenuId === review.id && (
                               <>
-                                <button
-                                  onClick={() => {
-                                    setEditingId(review.id);
-                                    setLandlordName(review.property?.landlord?.name || "");
-                                    setZipCode(review.property?.zipCode || "");
-                                    setRating(review.rating);
-                                    setComment(review.comment);
-                                    setCity(review.property?.city || "");
-                                    setState(review.property?.state || "");
-                                    setCountry(review.property?.country || "");
-                                    setTenantName(review.tenantName);
-                                    setTenantLocationForm(review.tenantLocation);
-                                    setTenure(review.tenure);
-                                    setFormCategories(
-                                      review.categories?.split(",").map((c) => c.trim()) || []
-                                    );
-                                    setCurrentPage("add");
-                                  }}
-                                  className="text-sm text-blue-600 hover:text-blue-700"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  onClick={() => deleteReview(review.id)}
-                                  className="text-sm text-red-600 hover:text-red-700"
-                                >
-                                  Delete
-                                </button>
+                                <div
+                                  className="fixed inset-0 z-10"
+                                  onClick={() => setOpenMenuId(null)}
+                                />
+                                <div className="absolute right-0 mt-1 w-44 bg-white border rounded-lg shadow-lg z-20 py-1">
+                                  <button
+                                    onClick={() => reportReview(review.id)}
+                                    className={`w-full flex items-center gap-2 text-left px-4 py-2 text-sm transition-colors ${
+                                      review.isReported
+                                        ? "text-red-600"
+                                        : "text-gray-600 hover:bg-gray-100"
+                                    }`}
+                                  >
+                                    <Flag size={14} />
+                                    {review.isReported ? "Reported" : "Report"}
+                                  </button>
+                                  {username && review.owner?.username === username && (
+                                    <>
+                                      <button
+                                        onClick={() => {
+                                          setEditingId(review.id);
+                                          setLandlordName(review.property?.landlord?.name || "");
+                                          setZipCode(review.property?.zipCode || "");
+                                          setRating(review.rating);
+                                          setComment(review.comment || "");
+                                          setCity(review.property?.city || "");
+                                          setState(review.property?.state || "");
+                                          setCountry(review.property?.country || "");
+                                          setTenantName(review.tenantName || "");
+                                          setTenantLocationForm(review.tenantLocation || "");
+                                          setTenure(review.tenure || "");
+                                          setShowName(review.showName ?? true);
+                                          setFormCategories(
+                                            review.categories?.split(",").map((c) => c.trim()) || []
+                                          );
+                                          setError("");
+                                          setOpenMenuId(null);
+                                          setCurrentPage("add");
+                                        }}
+                                        className="w-full flex items-center gap-2 text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 transition-colors"
+                                      >
+                                        <Pencil size={14} />
+                                        Edit
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          setOpenMenuId(null);
+                                          setConfirmDeleteId(review.id);
+                                        }}
+                                        className="w-full flex items-center gap-2 text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 transition-colors"
+                                      >
+                                        <Trash2 size={14} />
+                                        Delete
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
                               </>
                             )}
                           </div>
@@ -738,6 +1191,15 @@ export default function Home() {
                   onChange={(e) => setTenantName(e.target.value)}
                   className="border p-2 w-full rounded"
                 />
+                <label className="flex items-center gap-2 mt-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showName}
+                    onChange={(e) => setShowName(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  <span className="text-sm text-gray-600">Display my name on this review</span>
+                </label>
               </div>
             </div>
 
@@ -784,7 +1246,7 @@ export default function Home() {
                 className="border p-2 w-full rounded disabled:bg-gray-100"
               >
                 <option value="">Select a country...</option>
-                {countries.map((c: any) => (
+                {countries.map((c) => (
                   <option key={c.country} value={c.country}>
                     {c.country}
                   </option>
@@ -809,7 +1271,7 @@ export default function Home() {
                   className="border p-2 w-full rounded disabled:bg-gray-100"
                 >
                   <option value="">Select a state...</option>
-                  {states.map((s: any) => (
+                  {states.map((s) => (
                     <option key={s.name} value={s.name}>
                       {s.name}
                     </option>
@@ -830,7 +1292,7 @@ export default function Home() {
                   className="border p-2 w-full rounded disabled:bg-gray-100"
                 >
                   <option value="">Select a city...</option>
-                  {cities.map((c: string) => (
+                  {cities.map((c) => (
                     <option key={c} value={c}>
                       {c}
                     </option>
@@ -856,56 +1318,22 @@ export default function Home() {
               <label className="block text-sm font-medium mb-3">
                 Rating <span className="text-red-600">*</span>
               </label>
-              <div
-                className="flex gap-2"
-                onMouseEnter={() => setIsHoveringStars(true)}
-                onMouseLeave={() => {
-                  setIsHoveringStars(false);
-                  setHoverRating(0);
-                }}
-              >
+              <div className="flex gap-2" onMouseLeave={() => setHoverRating(0)}>
                 {[1, 2, 3, 4, 5].map((star) => {
                   const active = hoverRating || rating;
-                  const rawFill = Math.min(Math.max(active - (star - 1), 0), 1);
-                  const fillPercent = Math.round(rawFill * 100);
-                  const isHovered = hoverRating > 0 && Math.ceil(hoverRating) === star;
-                  const currentOpacity = isHoveringStars ? 0.6 : isHovered ? 0.6 : 1;
-
+                  const filled = star <= active;
                   return (
-                    <div
+                    <button
                       key={star}
-                      className="relative w-10 h-10 cursor-pointer"
-                      onMouseMove={(e: React.MouseEvent) => {
-                        const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-                        const isLeft = e.clientX < rect.left + rect.width / 2;
-                        setHoverRating(isLeft ? star - 0.5 : star);
-                      }}
-                      onClick={() => {
-                        setRating(hoverRating || star);
-                        setHasSelected(true);
-                      }}
+                      type="button"
+                      onMouseEnter={() => setHoverRating(star)}
+                      onClick={() => setRating(star)}
                     >
                       <Star
                         size={40}
-                        className="text-gray-300"
-                        style={{ opacity: currentOpacity }}
+                        className={filled ? "fill-yellow-400 text-yellow-400" : "text-gray-300"}
                       />
-                      <div
-                        style={{
-                          position: "absolute",
-                          left: 0,
-                          top: 0,
-                          width: `${fillPercent}%`,
-                          height: "100%",
-                          overflow: "hidden",
-                          pointerEvents: "none",
-                          transition: "width 120ms ease",
-                          opacity: currentOpacity,
-                        }}
-                      >
-                        <Star size={40} className="fill-yellow-400 text-yellow-400" />
-                      </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -917,7 +1345,7 @@ export default function Home() {
               </label>
               <div className="space-y-2">
                 {["Communication", "Maintenance", "Value", "Tenant Experience"].map((cat) => (
-                  <label key={cat} className="flex items-center gap-2">
+                  <label key={cat} className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={categories.includes(cat)}
@@ -971,7 +1399,9 @@ export default function Home() {
                     setTenantName("");
                     setTenantLocationForm("");
                     setTenure("");
+                    setShowName(true);
                     setFormCategories([]);
+                    setError("");
                   }}
                   className="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"
                 >
@@ -980,6 +1410,130 @@ export default function Home() {
               )}
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Sign In / Sign Up Page */}
+      {currentPage === "auth" && (
+        <div className="max-w-md mx-auto px-4 py-16">
+          <div className="bg-white rounded-lg border p-8">
+            <h2 className="text-2xl font-bold mb-1">
+              {authMode === "login" ? "Sign In" : "Create an Account"}
+            </h2>
+            <p className="text-sm text-gray-600 mb-6">
+              {authMode === "login"
+                ? "Sign in to write and manage your reviews."
+                : "Sign up to start writing reviews."}
+            </p>
+
+            <form onSubmit={submitAuth} className="space-y-4">
+              {authError && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded text-sm">
+                  {authError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Username</label>
+                <input
+                  type="text"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  autoComplete="username"
+                  className="border p-2 w-full rounded"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Password</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                  className="border p-2 w-full rounded"
+                />
+                {authMode === "register" && (
+                  <p className="text-xs text-gray-500 mt-1">At least 8 characters.</p>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50"
+              >
+                {authLoading ? "Please wait..." : authMode === "login" ? "Sign In" : "Sign Up"}
+              </button>
+            </form>
+
+            <p className="text-sm text-gray-600 mt-6 text-center">
+              {authMode === "login" ? (
+                <>
+                  Don&apos;t have an account?{" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode("register");
+                      setAuthError("");
+                    }}
+                    className="text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    Sign up
+                  </button>
+                </>
+              ) : (
+                <>
+                  Already have an account?{" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode("login");
+                      setAuthError("");
+                    }}
+                    className="text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    Sign in
+                  </button>
+                </>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {confirmDeleteId !== null && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 px-4">
+          <div className="bg-white rounded-lg border shadow-xl p-6 max-w-sm w-full">
+            <h3 className="text-lg font-bold mb-2">Delete this review?</h3>
+            <p className="text-sm text-gray-600 mb-6">
+              This can&apos;t be undone. The review will be permanently removed.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDeleteId(null)}
+                className="px-4 py-2 rounded-lg border text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => confirmDelete(confirmDeleteId)}
+                className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 pointer-events-none">
+          <div className="toast-fade bg-gray-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg">
+            {toast}
+          </div>
         </div>
       )}
     </main>

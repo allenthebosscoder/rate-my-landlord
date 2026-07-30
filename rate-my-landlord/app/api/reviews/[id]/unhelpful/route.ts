@@ -19,6 +19,7 @@ export async function POST(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: request.headers.get("Authorization") ?? "",
         },
       }
     );

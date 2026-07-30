@@ -21,6 +21,7 @@ export async function PUT(
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
+          Authorization: request.headers.get("Authorization") ?? "",
         },
         body: JSON.stringify(body),
       }
@@ -58,6 +59,9 @@ export async function DELETE(
       `http://localhost:8080/reviews/${id}`,
       {
         method: "DELETE",
+        headers: {
+          Authorization: request.headers.get("Authorization") ?? "",
+        },
       }
     );
 
@@ -70,9 +74,7 @@ export async function DELETE(
       );
     }
 
-    const data = await response.json();
-
-    return Response.json(data);
+    return new Response(null, { status: 204 });
   } catch (error) {
     console.error("DELETE /api/reviews/[id] error:", error);
     return Response.json(
