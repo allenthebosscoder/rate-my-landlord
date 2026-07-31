@@ -1,10 +1,11 @@
 import type { NextRequest } from "next/server";
+import { BACKEND_URL } from "@/app/api/_lib/backend";
 
 export async function POST(request: NextRequest) {
   try {
     const authorization = request.headers.get("Authorization") ?? "";
 
-    const response = await fetch("http://localhost:8080/auth/logout", {
+    const response = await fetch(`${BACKEND_URL}/auth/logout`, {
       method: "POST",
       headers: { Authorization: authorization },
     });

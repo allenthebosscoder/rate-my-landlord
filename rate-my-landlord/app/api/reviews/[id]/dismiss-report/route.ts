@@ -15,29 +15,24 @@ export async function POST(
     const { id } = await params;
 
     const response = await fetch(
-      `${BACKEND_URL}/reviews/${id}/unhelpful`,
+      `${BACKEND_URL}/reviews/${id}/dismiss-report`,
       {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Authorization: request.headers.get("Authorization") ?? "",
         },
       }
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Backend error:", response.status, errorText);
-      return Response.json(
-        { error: `Backend error: ${errorText}` },
-        { status: response.status }
-      );
+      const data = await response.json().catch(() => ({ error: "Failed to dismiss report" }));
+      return Response.json(data, { status: response.status });
     }
 
     const data = await response.json();
     return Response.json(data);
   } catch (error) {
-    console.error("POST /api/reviews/[id]/unhelpful error:", error);
+    console.error("POST /api/reviews/[id]/dismiss-report error:", error);
     return Response.json(
       { error: `Internal server error: ${error}` },
       { status: 500 }

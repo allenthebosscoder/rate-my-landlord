@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { BACKEND_URL } from "@/app/api/_lib/backend";
 
 type Params = {
   params: Promise<{
@@ -16,7 +17,7 @@ export async function PUT(
     const body = await request.json();
 
     const response = await fetch(
-      `http://localhost:8080/reviews/${id}`,
+      `${BACKEND_URL}/reviews/${id}`,
       {
         method: "PUT",
         headers: {
@@ -56,7 +57,7 @@ export async function DELETE(
     const { id } = await params;
 
     const response = await fetch(
-      `http://localhost:8080/reviews/${id}`,
+      `${BACKEND_URL}/reviews/${id}`,
       {
         method: "DELETE",
         headers: {

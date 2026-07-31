@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { BACKEND_URL } from "@/app/api/_lib/backend";
 
 type Params = {
   params: Promise<{
@@ -14,7 +15,7 @@ export async function POST(
     const { id } = await params;
 
     const response = await fetch(
-      `http://localhost:8080/reviews/${id}/helpful`,
+      `${BACKEND_URL}/reviews/${id}/helpful`,
       {
         method: "POST",
         headers: {

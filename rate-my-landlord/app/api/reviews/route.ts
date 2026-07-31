@@ -1,9 +1,10 @@
 import type { NextRequest } from "next/server";
+import { BACKEND_URL } from "@/app/api/_lib/backend";
 
 export async function GET(request: NextRequest) {
   try {
     const response = await fetch(
-      "http://localhost:8080/reviews",
+      `${BACKEND_URL}/reviews`,
       {
         headers: {
           Authorization: request.headers.get("Authorization") ?? "",
@@ -36,7 +37,7 @@ export async function POST(request: NextRequest) {
     console.log("POST /api/reviews body:", body);
 
     const response = await fetch(
-      "http://localhost:8080/reviews",
+      `${BACKEND_URL}/reviews`,
       {
         method: "POST",
         headers: {

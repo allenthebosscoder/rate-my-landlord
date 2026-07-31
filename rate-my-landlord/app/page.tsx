@@ -1,6 +1,6 @@
 "use client";
 
-import { Star, ThumbsUp, ThumbsDown, Flag, Share2, MoreVertical, Pencil, Trash2, EyeOff } from "lucide-react";
+import { Star, ThumbsUp, ThumbsDown, Flag, Share2, MoreVertical, Pencil, Trash2, EyeOff, Building2 } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 type Review = {
@@ -35,19 +35,21 @@ type Review = {
   };
 };
 
-type Page = "view" | "add" | "auth";
+type Page = "view" | "add" | "auth" | "moderation";
 
-type Auth = { token: string; username: string } | null;
+type Auth = { token: string; username: string; isAdmin: boolean } | null;
 
 const AUTH_TOKEN_KEY = "rml_token";
 const AUTH_USERNAME_KEY = "rml_username";
+const AUTH_IS_ADMIN_KEY = "rml_is_admin";
 const authListeners = new Set<() => void>();
 let cachedAuth: Auth | undefined;
 
 function readAuthFromStorage(): Auth {
   const token = localStorage.getItem(AUTH_TOKEN_KEY);
   const username = localStorage.getItem(AUTH_USERNAME_KEY);
-  return token && username ? { token, username } : null;
+  const isAdmin = localStorage.getItem(AUTH_IS_ADMIN_KEY) === "true";
+  return token && username ? { token, username, isAdmin } : null;
 }
 
 function getAuthSnapshot(): Auth {
@@ -72,9 +74,11 @@ function setAuth(auth: Auth) {
   if (auth) {
     localStorage.setItem(AUTH_TOKEN_KEY, auth.token);
     localStorage.setItem(AUTH_USERNAME_KEY, auth.username);
+    localStorage.setItem(AUTH_IS_ADMIN_KEY, String(auth.isAdmin));
   } else {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(AUTH_USERNAME_KEY);
+    localStorage.removeItem(AUTH_IS_ADMIN_KEY);
   }
   cachedAuth = auth;
   authListeners.forEach((listener) => listener());
@@ -107,6 +111,46 @@ const CATEGORY_OPTIONS = [
   "Maintenance",
   "Value",
 ];
+
+const MONTH_OPTIONS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+const CURRENT_YEAR = new Date().getFullYear();
+const TENURE_YEARS = Array.from({ length: 21 }, (_, i) => String(CURRENT_YEAR - i));
+
+function formatTenure(startMonth: string, startYear: string, endMonth: string, endYear: string): string {
+  const start = startYear ? (startMonth ? `${startMonth} ${startYear}` : startYear) : "";
+  const end = endYear ? (endMonth ? `${endMonth} ${endYear}` : endYear) : "";
+  if (start && end) return `${start} - ${end}`;
+  return start || end;
+}
+
+// Best-effort parse of previously free-typed tenure strings ("2022 - 2024",
+// "January 2022 - March 2024") back into structured fields for editing.
+// Anything that doesn't match just comes back blank rather than guessing.
+function parseTenure(tenure: string): {
+  startMonth: string;
+  startYear: string;
+  endMonth: string;
+  endYear: string;
+} {
+  const empty = { startMonth: "", startYear: "", endMonth: "", endYear: "" };
+  const parts = tenure.split(" - ").map((p) => p.trim());
+  if (parts.length !== 2) return empty;
+
+  const parsePart = (part: string) => {
+    const match = part.match(/^(?:([A-Za-z]+)\s+)?(\d{4})$/);
+    if (!match) return { month: "", year: "" };
+    const [, month, year] = match;
+    return { month: month && MONTH_OPTIONS.includes(month) ? month : "", year };
+  };
+
+  const start = parsePart(parts[0]);
+  const end = parsePart(parts[1]);
+  return { startMonth: start.month, startYear: start.year, endMonth: end.month, endYear: end.year };
+}
 
 function getInitials(name: string): string {
   return name
@@ -181,6 +225,7 @@ export default function Home() {
   const auth = useSyncExternalStore(subscribeAuth, getAuthSnapshot, getServerAuthSnapshot);
   const token = auth?.token ?? null;
   const username = auth?.username ?? null;
+  const isAdmin = auth?.isAdmin ?? false;
 
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authUsername, setAuthUsername] = useState("");
@@ -196,6 +241,7 @@ export default function Home() {
   const orderSignatureRef = useRef<string | null>(null);
   const [orderedIds, setOrderedIds] = useState<number[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const browseGridRef = useRef<HTMLDivElement>(null);
 
   const [reviews, setReviews] = useState<Review[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -208,21 +254,47 @@ export default function Home() {
   const [state, setState] = useState("");
   const [country, setCountry] = useState("");
   const [tenantName, setTenantName] = useState("");
-  const [tenantLocation, setTenantLocationForm] = useState("");
-  const [tenure, setTenure] = useState("");
+  const [tenureStartMonth, setTenureStartMonth] = useState("");
+  const [tenureStartYear, setTenureStartYear] = useState("");
+  const [tenureEndMonth, setTenureEndMonth] = useState("");
+  const [tenureEndYear, setTenureEndYear] = useState("");
   const [categories, setFormCategories] = useState<string[]>([]);
   const [showName, setShowName] = useState(true);
   const [error, setError] = useState("");
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [reportedReviews, setReportedReviews] = useState<Review[]>([]);
 
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 2500);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    // Switching pages (or between the landlord grid and a landlord's detail
+    // view) swaps in entirely different content, but the browser keeps
+    // whatever scroll position you were at — landing you mid-page on a
+    // layout you haven't scrolled in yet. Snap back to the top on every
+    // such transition.
+    window.scrollTo({ top: 0 });
+  }, [currentPage, selectedLandlord]);
+
+  useEffect(() => {
+    // Keep the moderation nav badge count fresh whenever admin status
+    // changes (sign in/out), not just when the moderation page is opened.
+    if (isAdmin) {
+      loadReportedReviews();
+    } else {
+      // Clearing stale admin-only data the instant admin status is revoked.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setReportedReviews([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
   const [countries, setCountries] = useState<Country[]>([]);
   const [states, setStates] = useState<StateOption[]>([]);
@@ -259,6 +331,40 @@ export default function Home() {
     }
   }
 
+  async function loadReportedReviews() {
+    if (!token) {
+      setReportedReviews([]);
+      return;
+    }
+    try {
+      const response = await fetch("/api/reviews/reported", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        setReportedReviews([]);
+        return;
+      }
+      const data = await response.json();
+      setReportedReviews(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("Failed to load reported reviews:", err);
+      setReportedReviews([]);
+    }
+  }
+
+  async function dismissReviewReport(id: number) {
+    if (!token) return;
+    const response = await fetch(`/api/reviews/${id}/dismiss-report`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      handleActionFailure(response.status);
+      return;
+    }
+    loadReportedReviews();
+  }
+
   async function loadCountries() {
     try {
       setLoadingLocations(true);
@@ -274,11 +380,13 @@ export default function Home() {
     }
   }
 
-  async function loadStates(countryName: string) {
+  async function loadStates(countryName: string, keepSelection = false) {
     try {
       setLoadingLocations(true);
-      setState("");
-      setCities([]);
+      if (!keepSelection) {
+        setState("");
+        setCities([]);
+      }
       const response = await fetch("https://countriesnow.space/api/v0.1/countries/states", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -296,10 +404,12 @@ export default function Home() {
     }
   }
 
-  async function loadCities(countryName: string, stateName: string) {
+  async function loadCities(countryName: string, stateName: string, keepSelection = false) {
     try {
       setLoadingLocations(true);
-      setCity("");
+      if (!keepSelection) {
+        setCity("");
+      }
       const response = await fetch("https://countriesnow.space/api/v0.1/countries/state/cities", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -370,8 +480,8 @@ export default function Home() {
       comment,
       tenantName,
       showName,
-      tenantLocation,
-      tenure,
+      tenantLocation: [city, state].filter(Boolean).join(", ") || country,
+      tenure: formatTenure(tenureStartMonth, tenureStartYear, tenureEndMonth, tenureEndYear),
       categories: categories.join(","),
       property: {
         zipCode,
@@ -429,8 +539,10 @@ export default function Home() {
       setState("");
       setCountry("");
       setTenantName("");
-      setTenantLocationForm("");
-      setTenure("");
+      setTenureStartMonth("");
+      setTenureStartYear("");
+      setTenureEndMonth("");
+      setTenureEndYear("");
       setShowName(true);
       setFormCategories([]);
 
@@ -458,6 +570,9 @@ export default function Home() {
       return;
     }
     loadReviews();
+    if (isAdmin) {
+      loadReportedReviews();
+    }
   }
 
   function requireSignIn(message: string): boolean {
@@ -468,7 +583,7 @@ export default function Home() {
     return true;
   }
 
-  function handleVoteFailure(status: number) {
+  function handleActionFailure(status: number) {
     if (status === 401) {
       setAuth(null);
       setToast("Your session expired. Please sign in again.");
@@ -485,7 +600,7 @@ export default function Home() {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!response.ok) {
-      handleVoteFailure(response.status);
+      handleActionFailure(response.status);
       return;
     }
     loadReviews();
@@ -498,7 +613,7 @@ export default function Home() {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!response.ok) {
-      handleVoteFailure(response.status);
+      handleActionFailure(response.status);
       return;
     }
     loadReviews();
@@ -512,7 +627,7 @@ export default function Home() {
     });
     setOpenMenuId(null);
     if (!response.ok) {
-      handleVoteFailure(response.status);
+      handleActionFailure(response.status);
       return;
     }
     loadReviews();
@@ -529,6 +644,24 @@ export default function Home() {
     setEditingId(null);
     setSearchQuery("");
     setError("");
+  }
+
+  function startWritingReview() {
+    if (!username) {
+      setAuthMode("login");
+      setCurrentPage("auth");
+      return;
+    }
+    if (!tenantName.trim()) {
+      setTenantName(username);
+    }
+    setError("");
+    setCurrentPage("add");
+    setSelectedLandlord(null);
+  }
+
+  function scrollToBrowseGrid() {
+    browseGridRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function submitAuth(e: React.FormEvent) {
@@ -558,7 +691,7 @@ export default function Home() {
         return;
       }
 
-      setAuth({ token: data.token, username: data.username });
+      setAuth({ token: data.token, username: data.username, isAdmin: Boolean(data.isAdmin) });
       setAuthUsername("");
       setAuthPassword("");
       goHome();
@@ -695,22 +828,10 @@ export default function Home() {
               />
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <button
-              onClick={() => {
-                if (!username) {
-                  setAuthMode("login");
-                  setCurrentPage("auth");
-                  return;
-                }
-                if (!tenantName.trim()) {
-                  setTenantName(username);
-                }
-                setError("");
-                setCurrentPage("add");
-                setSelectedLandlord(null);
-              }}
-              className="px-4 py-2 border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50"
+              onClick={startWritingReview}
+              className="px-4 py-2 border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 whitespace-nowrap"
             >
               Write a Review
             </button>
@@ -718,22 +839,85 @@ export default function Home() {
               <button
                 onClick={seedDevReviews}
                 title="Dev only: generate random test reviews"
-                className="px-3 py-2 text-xs border border-dashed border-gray-400 text-gray-500 rounded-lg hover:bg-gray-50"
+                className="hidden lg:block px-3 py-2 text-xs border border-dashed border-gray-400 text-gray-500 rounded-lg hover:bg-gray-50 whitespace-nowrap"
               >
                 🎲 Seed Reviews
               </button>
             )}
             {username ? (
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-gray-700">
-                  Signed in as <span className="font-medium">{username}</span>
-                </span>
+              <div className="relative">
                 <button
-                  onClick={logOut}
-                  className="px-4 py-2 border rounded-lg hover:bg-gray-50 text-sm"
+                  onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+                  className="flex items-center gap-2 pl-2 pr-3 py-1.5 border rounded-full hover:bg-gray-50"
                 >
-                  Log Out
+                  <div
+                    className={`w-7 h-7 rounded-full ${getInitialsColor(
+                      username
+                    )} flex items-center justify-center text-white font-bold text-xs flex-shrink-0`}
+                  >
+                    {getInitials(username)}
+                  </div>
+                  <span className="hidden sm:inline text-sm font-medium max-w-[10rem] truncate">
+                    {username}
+                  </span>
+                  {isAdmin && reportedReviews.length > 0 && (
+                    <span className="w-2 h-2 rounded-full bg-red-500" />
+                  )}
                 </button>
+
+                {accountMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-10"
+                      onClick={() => setAccountMenuOpen(false)}
+                    />
+                    <div className="absolute right-0 mt-2 w-56 bg-white border rounded-lg shadow-lg z-20 py-1">
+                      <div className="px-4 py-2 text-xs text-gray-500 border-b">
+                        Signed in as <span className="font-medium text-gray-700">{username}</span>
+                      </div>
+                      {process.env.NODE_ENV === "development" && (
+                        <button
+                          onClick={() => {
+                            seedDevReviews();
+                            setAccountMenuOpen(false);
+                          }}
+                          className="lg:hidden w-full text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
+                        >
+                          🎲 Seed Reviews
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => {
+                            loadReportedReviews();
+                            setCurrentPage("moderation");
+                            setAccountMenuOpen(false);
+                          }}
+                          className="w-full flex items-center justify-between px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Flag size={14} />
+                            Moderation
+                          </span>
+                          {reportedReviews.length > 0 && (
+                            <span className="px-1.5 py-0.5 text-xs rounded-full bg-red-100 text-red-700">
+                              {reportedReviews.length}
+                            </span>
+                          )}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          setAccountMenuOpen(false);
+                          logOut();
+                        }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
+                      >
+                        Log Out
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             ) : (
               <button
@@ -741,7 +925,7 @@ export default function Home() {
                   setAuthMode("login");
                   setCurrentPage("auth");
                 }}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 whitespace-nowrap"
               >
                 Sign In
               </button>
@@ -753,13 +937,12 @@ export default function Home() {
       {/* Main Content */}
       {currentPage === "view" && (
         <div className="max-w-7xl mx-auto px-4 py-6">
+          {selectedLandlord ? (
           <div className="flex gap-6">
             {/* Left Sidebar */}
             <div className="w-80 flex-shrink-0">
-              {selectedLandlord && (
-                <>
                   {/* Landlord Card */}
-                  <div className="bg-white rounded-lg border p-6 mb-6">
+                  <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6 mb-6">
                     <div className="flex items-start justify-between mb-4">
                       <div>
                         <h2 className="text-2xl font-bold">{selectedLandlord}</h2>
@@ -786,7 +969,7 @@ export default function Home() {
                   </div>
 
                   {/* Rating Distribution */}
-                  <div className="bg-white rounded-lg border p-6 mb-6">
+                  <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6 mb-6">
                     <h3 className="font-bold mb-4">Rating Distribution</h3>
                     {[5, 4, 3, 2, 1].map((rating) => (
                       <div key={rating} className="flex items-center gap-3 mb-3">
@@ -817,7 +1000,7 @@ export default function Home() {
                   </div>
 
                   {/* Rating Filter */}
-                  <div className="bg-white rounded-lg border p-6 mb-6">
+                  <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6 mb-6">
                     <h3 className="font-bold mb-4">Filter by Rating</h3>
                     <div className="space-y-2">
                       {[5, 4, 3, 2, 1].map((r) => (
@@ -853,73 +1036,10 @@ export default function Home() {
                       Share
                     </button>
                   </div>
-                </>
-              )}
-
-              {!selectedLandlord && landlords.length > 0 && (
-                <div className="bg-white rounded-lg border p-6">
-                  <h3 className="font-bold mb-4">Select a Landlord</h3>
-                  {searchedLandlords.length === 0 && (
-                    <p className="text-sm text-gray-600">
-                      No landlords match &quot;{searchQuery}&quot;.
-                    </p>
-                  )}
-                  <div className="space-y-2">
-                    {searchedLandlords.map((landlord) => {
-                      const landlordReviews = reviews?.filter(
-                        (r) => r.property?.landlord?.name === landlord
-                      ) || [];
-                      const avg =
-                        landlordReviews.length > 0
-                          ? (
-                              landlordReviews.reduce((sum, r) => sum + r.rating, 0) /
-                              landlordReviews.length
-                            ).toFixed(1)
-                          : "0.0";
-
-                      return (
-                        <button
-                          key={landlord}
-                          onClick={() => setSelectedLandlord(landlord)}
-                          className="w-full text-left px-4 py-3 border rounded-lg hover:bg-blue-50 hover:border-blue-300 transition-colors"
-                        >
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <p className="font-medium">{landlord}</p>
-                              <p className="text-xs text-gray-600">
-                                {landlordReviews.length} review
-                                {landlordReviews.length !== 1 ? "s" : ""}
-                              </p>
-                            </div>
-                            <div className="text-right">
-                              <p className="font-bold text-sm">{avg}</p>
-                              <div className="flex gap-0.5">
-                                {[...Array(5)].map((_, i) => (
-                                  <Star
-                                    key={i}
-                                    size={12}
-                                    className={
-                                      i < Math.floor(parseFloat(avg))
-                                        ? "fill-yellow-400 text-yellow-400"
-                                        : "text-gray-300"
-                                    }
-                                  />
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* Right Content */}
             <div className="flex-1">
-              {selectedLandlord && (
-                <>
                   {/* Reviews Header */}
                   <div className="flex items-center justify-between mb-6">
                     <h2 className="text-2xl font-bold">Reviews ({filteredReviews.length})</h2>
@@ -956,7 +1076,10 @@ export default function Home() {
                   {/* Reviews List */}
                   <div className="space-y-4">
                     {displayedReviews.map((review) => (
-                      <div key={review.id} className="bg-white rounded-lg border p-6">
+                      <div
+                        key={review.id}
+                        className="bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow p-6"
+                      >
                         {/* Review Header */}
                         <div className="flex items-start justify-between mb-3">
                           <div className="flex gap-4">
@@ -1092,17 +1215,28 @@ export default function Home() {
                                     <>
                                       <button
                                         onClick={() => {
+                                          const editCountry = review.property?.country || "";
+                                          const editState = review.property?.state || "";
                                           setEditingId(review.id);
                                           setLandlordName(review.property?.landlord?.name || "");
                                           setZipCode(review.property?.zipCode || "");
                                           setRating(review.rating);
                                           setComment(review.comment || "");
                                           setCity(review.property?.city || "");
-                                          setState(review.property?.state || "");
-                                          setCountry(review.property?.country || "");
+                                          setState(editState);
+                                          setCountry(editCountry);
+                                          if (editCountry) {
+                                            loadStates(editCountry, true);
+                                          }
+                                          if (editCountry && editState) {
+                                            loadCities(editCountry, editState, true);
+                                          }
                                           setTenantName(review.tenantName || "");
-                                          setTenantLocationForm(review.tenantLocation || "");
-                                          setTenure(review.tenure || "");
+                                          const parsedTenure = parseTenure(review.tenure || "");
+                                          setTenureStartMonth(parsedTenure.startMonth);
+                                          setTenureStartYear(parsedTenure.startYear);
+                                          setTenureEndMonth(parsedTenure.endMonth);
+                                          setTenureEndYear(parsedTenure.endYear);
                                           setShowName(review.showName ?? true);
                                           setFormCategories(
                                             review.categories?.split(",").map((c) => c.trim()) || []
@@ -1136,10 +1270,133 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
-                </>
-              )}
             </div>
           </div>
+          ) : (
+            <div>
+              {/* Hero */}
+              <div className="mb-10 rounded-2xl bg-gradient-to-br from-blue-600 to-blue-800 text-white overflow-hidden">
+                <div className="flex flex-col md:flex-row items-center gap-8 px-8 py-12">
+                  <div className="flex-1 text-center md:text-left">
+                    <h1 className="text-3xl md:text-4xl font-bold mb-3">
+                      Know before you sign the lease
+                    </h1>
+                    <p className="text-blue-100 mb-6 max-w-md mx-auto md:mx-0">
+                      Real tenants sharing real experiences with landlords and property
+                      managers, so you know what you&apos;re getting into.
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-3 justify-center md:justify-start">
+                      <button
+                        onClick={startWritingReview}
+                        className="px-6 py-3 bg-white text-blue-700 rounded-lg font-semibold hover:bg-blue-50 transition-colors"
+                      >
+                        Write a Review
+                      </button>
+                      <button
+                        onClick={scrollToBrowseGrid}
+                        className="px-6 py-3 border border-white/60 text-white rounded-lg font-semibold hover:bg-white/10 transition-colors"
+                      >
+                        Browse Landlords
+                      </button>
+                    </div>
+                  </div>
+                  <Building2
+                    size={140}
+                    strokeWidth={1.25}
+                    className="text-blue-300/50 flex-shrink-0 hidden md:block"
+                  />
+                </div>
+              </div>
+
+              <div ref={browseGridRef} className="mb-6 scroll-mt-6">
+                <h2 className="text-2xl font-bold">Browse Landlords</h2>
+                <p className="text-sm text-gray-600">
+                  {landlords.length} landlord{landlords.length !== 1 ? "s" : ""} ·{" "}
+                  {(reviews || []).length} review{(reviews || []).length !== 1 ? "s" : ""}
+                </p>
+              </div>
+
+              {landlords.length === 0 && (
+                <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-16 text-center text-gray-500">
+                  No reviews yet. Be the first to write one.
+                </div>
+              )}
+
+              {landlords.length > 0 && searchedLandlords.length === 0 && (
+                <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-16 text-center text-gray-500">
+                  No landlords match &quot;{searchQuery}&quot;.
+                </div>
+              )}
+
+              {searchedLandlords.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {searchedLandlords.map((landlord) => {
+                    const landlordReviews =
+                      reviews?.filter((r) => r.property?.landlord?.name === landlord) || [];
+                    const avg =
+                      landlordReviews.length > 0
+                        ? (
+                            landlordReviews.reduce((sum, r) => sum + r.rating, 0) /
+                            landlordReviews.length
+                          ).toFixed(1)
+                        : "0.0";
+                    const avgNum = parseFloat(avg);
+                    const ratingBadge =
+                      avgNum >= 4
+                        ? "bg-green-50 text-green-700"
+                        : avgNum >= 2.5
+                        ? "bg-yellow-50 text-yellow-700"
+                        : "bg-red-50 text-red-700";
+
+                    return (
+                      <button
+                        key={landlord}
+                        onClick={() => setSelectedLandlord(landlord)}
+                        className="text-left bg-white rounded-xl border border-gray-100 shadow-sm p-5 hover:shadow-md hover:border-blue-300 transition-all"
+                      >
+                        <div className="flex items-start gap-3 mb-4">
+                          <div
+                            className={`w-11 h-11 rounded-lg ${getInitialsColor(
+                              landlord
+                            )} flex items-center justify-center text-white font-bold flex-shrink-0`}
+                          >
+                            {getInitials(landlord)}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-semibold truncate">{landlord}</p>
+                            <p className="text-xs text-gray-500">
+                              {landlordReviews.length} review
+                              {landlordReviews.length !== 1 ? "s" : ""}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div className="flex gap-0.5">
+                            {[...Array(5)].map((_, i) => (
+                              <Star
+                                key={i}
+                                size={14}
+                                className={
+                                  i < Math.round(avgNum)
+                                    ? "fill-yellow-400 text-yellow-400"
+                                    : "text-gray-300"
+                                }
+                              />
+                            ))}
+                          </div>
+                          <span
+                            className={`text-xs font-bold px-2 py-1 rounded-full ${ratingBadge}`}
+                          >
+                            {avg}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1160,7 +1417,7 @@ export default function Home() {
             {editingId ? "Edit Review" : "Write a Review"}
           </h2>
 
-          <form onSubmit={submitReview} className="space-y-6 bg-white rounded-lg border p-6">
+          <form onSubmit={submitReview} className="space-y-6 bg-white rounded-xl border border-gray-100 shadow-sm p-6">
             {error && (
               <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
                 {error}
@@ -1203,58 +1460,114 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium mb-2">
-                  Your Location
-                </label>
-                <input
-                  type="text"
-                  placeholder="City, State"
-                  value={tenantLocation}
-                  onChange={(e) => setTenantLocationForm(e.target.value)}
-                  className="border p-2 w-full rounded"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">
-                  Tenure (e.g., 2022 - 2024)
-                </label>
-                <input
-                  type="text"
-                  placeholder="Tenure period"
-                  value={tenure}
-                  onChange={(e) => setTenure(e.target.value)}
-                  className="border p-2 w-full rounded"
-                />
-              </div>
-            </div>
-
             <div>
-              <label className="block text-sm font-medium mb-2">
-                Country <span className="text-red-600">*</span>
-              </label>
-              <select
-                value={country}
-                onChange={(e) => {
-                  setCountry(e.target.value);
-                  if (e.target.value) {
-                    loadStates(e.target.value);
-                  }
-                }}
-                disabled={loadingLocations}
-                className="border p-2 w-full rounded disabled:bg-gray-100"
-              >
-                <option value="">Select a country...</option>
-                {countries.map((c) => (
-                  <option key={c.country} value={c.country}>
-                    {c.country}
-                  </option>
-                ))}
-              </select>
+              <label className="block text-sm font-medium mb-2">Tenure</label>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Start</p>
+                  <div className="flex gap-2">
+                    <div className="w-1/2">
+                      <label className="block text-xs text-gray-500 mb-1">Month</label>
+                      <select
+                        value={tenureStartMonth}
+                        onChange={(e) => setTenureStartMonth(e.target.value)}
+                        className="border p-2 w-full rounded"
+                      >
+                        <option value="">Month</option>
+                        {MONTH_OPTIONS.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="w-1/2">
+                      <label className="block text-xs text-gray-500 mb-1">
+                        Year <span className="text-red-600">*</span>
+                      </label>
+                      <select
+                        value={tenureStartYear}
+                        onChange={(e) => setTenureStartYear(e.target.value)}
+                        className="border p-2 w-full rounded"
+                      >
+                        <option value="">Year</option>
+                        {TENURE_YEARS.map((y) => (
+                          <option key={y} value={y}>
+                            {y}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">End</p>
+                  <div className="flex gap-2">
+                    <div className="w-1/2">
+                      <label className="block text-xs text-gray-500 mb-1">Month</label>
+                      <select
+                        value={tenureEndMonth}
+                        onChange={(e) => setTenureEndMonth(e.target.value)}
+                        className="border p-2 w-full rounded"
+                      >
+                        <option value="">Month</option>
+                        {MONTH_OPTIONS.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="w-1/2">
+                      <label className="block text-xs text-gray-500 mb-1">
+                        Year <span className="text-red-600">*</span>
+                      </label>
+                      <select
+                        value={tenureEndYear}
+                        onChange={(e) => setTenureEndYear(e.target.value)}
+                        className="border p-2 w-full rounded"
+                      >
+                        <option value="">Year</option>
+                        {TENURE_YEARS.map((y) => (
+                          <option key={y} value={y}>
+                            {y}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Whole section is optional, but a month without a year won&apos;t be saved.
+              </p>
             </div>
 
-            {states.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">
+                  Country <span className="text-red-600">*</span>
+                </label>
+                <select
+                  value={country}
+                  onChange={(e) => {
+                    setCountry(e.target.value);
+                    if (e.target.value) {
+                      loadStates(e.target.value);
+                    }
+                  }}
+                  disabled={loadingLocations}
+                  className="border p-2 w-full rounded disabled:bg-gray-100"
+                >
+                  <option value="">Select a country...</option>
+                  {countries.map((c) => (
+                    <option key={c.country} value={c.country}>
+                      {c.country}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block text-sm font-medium mb-2">
                   State / Province
@@ -1267,10 +1580,12 @@ export default function Home() {
                       loadCities(country, e.target.value);
                     }
                   }}
-                  disabled={loadingLocations}
+                  disabled={loadingLocations || states.length === 0}
                   className="border p-2 w-full rounded disabled:bg-gray-100"
                 >
-                  <option value="">Select a state...</option>
+                  <option value="">
+                    {states.length === 0 ? "Select a country first" : "Select a state..."}
+                  </option>
                   {states.map((s) => (
                     <option key={s.name} value={s.name}>
                       {s.name}
@@ -1278,20 +1593,18 @@ export default function Home() {
                   ))}
                 </select>
               </div>
-            )}
 
-            {cities.length > 0 && (
               <div>
-                <label className="block text-sm font-medium mb-2">
-                  City
-                </label>
+                <label className="block text-sm font-medium mb-2">City</label>
                 <select
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
-                  disabled={loadingLocations}
+                  disabled={loadingLocations || cities.length === 0}
                   className="border p-2 w-full rounded disabled:bg-gray-100"
                 >
-                  <option value="">Select a city...</option>
+                  <option value="">
+                    {cities.length === 0 ? "Select a state first" : "Select a city..."}
+                  </option>
                   {cities.map((c) => (
                     <option key={c} value={c}>
                       {c}
@@ -1299,7 +1612,7 @@ export default function Home() {
                   ))}
                 </select>
               </div>
-            )}
+            </div>
 
             <div>
               <label className="block text-sm font-medium mb-2">
@@ -1321,19 +1634,39 @@ export default function Home() {
               <div className="flex gap-2" onMouseLeave={() => setHoverRating(0)}>
                 {[1, 2, 3, 4, 5].map((star) => {
                   const active = hoverRating || rating;
-                  const filled = star <= active;
+                  const rawFill = Math.min(Math.max(active - (star - 1), 0), 1);
+                  const fillPercent = Math.round(rawFill * 100);
+
                   return (
-                    <button
+                    <div
                       key={star}
-                      type="button"
-                      onMouseEnter={() => setHoverRating(star)}
-                      onClick={() => setRating(star)}
+                      className="relative w-10 h-10 cursor-pointer"
+                      onMouseMove={(e: React.MouseEvent) => {
+                        const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+                        const isLeft = e.clientX < rect.left + rect.width / 2;
+                        // Half stars are allowed everywhere except below 1 —
+                        // the lower-left half of the first star still counts
+                        // as a full 1, not 0.5.
+                        setHoverRating(Math.max(1, isLeft ? star - 0.5 : star));
+                      }}
+                      onClick={() => setRating(Math.max(1, hoverRating || star))}
                     >
-                      <Star
-                        size={40}
-                        className={filled ? "fill-yellow-400 text-yellow-400" : "text-gray-300"}
-                      />
-                    </button>
+                      <Star size={40} className="text-gray-300" />
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          top: 0,
+                          width: `${fillPercent}%`,
+                          height: "100%",
+                          overflow: "hidden",
+                          pointerEvents: "none",
+                          transition: "width 120ms ease",
+                        }}
+                      >
+                        <Star size={40} className="fill-yellow-400 text-yellow-400" />
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -1397,8 +1730,10 @@ export default function Home() {
                     setState("");
                     setCountry("");
                     setTenantName("");
-                    setTenantLocationForm("");
-                    setTenure("");
+                    setTenureStartMonth("");
+                    setTenureStartYear("");
+                    setTenureEndMonth("");
+                    setTenureEndYear("");
                     setShowName(true);
                     setFormCategories([]);
                     setError("");
@@ -1416,7 +1751,7 @@ export default function Home() {
       {/* Sign In / Sign Up Page */}
       {currentPage === "auth" && (
         <div className="max-w-md mx-auto px-4 py-16">
-          <div className="bg-white rounded-lg border p-8">
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-8">
             <h2 className="text-2xl font-bold mb-1">
               {authMode === "login" ? "Sign In" : "Create an Account"}
             </h2>
@@ -1499,6 +1834,72 @@ export default function Home() {
               )}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Moderation Page */}
+      {currentPage === "moderation" && isAdmin && (
+        <div className="max-w-4xl mx-auto px-4 py-6">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-2xl font-bold">Moderation Queue</h2>
+              <p className="text-sm text-gray-600">
+                Reported reviews — dismiss if there&apos;s no real problem, or remove them.
+              </p>
+            </div>
+            <button onClick={goHome} className="text-blue-600 hover:text-blue-700 text-sm">
+              ← Back
+            </button>
+          </div>
+
+          {reportedReviews.length === 0 ? (
+            <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-16 text-center text-gray-500">
+              Nothing reported right now.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {reportedReviews.map((review) => (
+                <div
+                  key={review.id}
+                  className="bg-white rounded-xl border border-gray-100 shadow-sm p-6"
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <p className="font-semibold">
+                        {review.property?.landlord?.name}
+                        <span className="text-gray-400 font-normal">
+                          {" "}
+                          · {review.showName === false ? "Anonymous" : review.tenantName}
+                        </span>
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {review.rating} stars ·{" "}
+                        {new Date(review.createdAt || "").toLocaleDateString()}
+                      </p>
+                    </div>
+                    <span className="text-xs font-bold px-2 py-1 rounded-full bg-red-50 text-red-700">
+                      Reported
+                    </span>
+                  </div>
+                  <p className="text-gray-700 mb-4">{review.comment}</p>
+                  <div className="flex gap-2 pt-4 border-t">
+                    <button
+                      onClick={() => dismissReviewReport(review.id)}
+                      className="px-4 py-2 border rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Dismiss report
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(review.id)}
+                      className="px-4 py-2 rounded-lg text-sm bg-red-600 text-white hover:bg-red-700"
+                    >
+                      Remove review
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
