@@ -39,15 +39,23 @@ To add a column or table: write a new `V{n}__description.sql` migration rather t
 
 ### Authentication
 
-Accounts are username/password (bcrypt-hashed) with opaque, server-side session tokens (not JWTs — revocable on logout, no signing-key management). Send `Authorization: Bearer <token>` on any authenticated request.
+Accounts are username/password (bcrypt-hashed) with opaque, server-side session tokens (not JWTs — revocable on logout, no signing-key management). Send `Authorization: Bearer <token>` on any authenticated request. An email is required at registration (not just for login) since it's what password reset is sent to.
 
-The **first account ever registered while no admin exists** automatically becomes an admin — no manual DB edit needed to bootstrap a fresh deployment. Admins can moderate reported reviews and delete any review, not just their own.
+**Admin bootstrap**: set `ADMIN_USERNAMES` (comma-separated) to the usernames that should be admins — they get promoted on registration, or on their next login if the account already exists. Leave it unset for local dev and the first account ever registered becomes admin instead, so there's always someone who can moderate without extra setup. Set the allowlist before any real deployment: with it unset, whoever registers first on a public site becomes admin, which is fine on your laptop and not fine in the open.
 
-| Method | Path             | Description                                    |
-| ------ | ---------------- | ----------------------------------------------- |
-| POST   | `/auth/register` | Create an account, returns `{token, username, isAdmin}` |
-| POST   | `/auth/login`    | Log in, returns `{token, username, isAdmin}`    |
-| POST   | `/auth/logout`   | Revoke the current token                        |
+Admins can moderate reported reviews and delete any review, not just their own.
+
+Login, register, and forgot-password are rate-limited per IP (in-memory — fine for one instance, would need a shared store like Redis behind a load balancer). Creating a review is rate-limited per account.
+
+| Method | Path                     | Description                                              |
+| ------ | ------------------------ | ---------------------------------------------------------|
+| POST   | `/auth/register`         | Create an account (username, email, password required), returns `{token, username, isAdmin}` |
+| POST   | `/auth/login`            | Log in, returns `{token, username, isAdmin}`              |
+| POST   | `/auth/logout`           | Revoke the current token                                  |
+| POST   | `/auth/forgot-password`  | Email a reset link if the email has an account (always returns the same generic response either way, to avoid leaking which emails are registered) |
+| POST   | `/auth/reset-password`   | `{token, newPassword}` — token is single-use, expires in 60 minutes, and resetting revokes all of that account's existing sessions |
+
+Password reset email is mocked by default (`MAIL_MOCK=true`) — nothing is actually sent, and the reset link is logged instead (`grep "Password reset requested" ` on the backend output), so the whole flow works locally with zero setup. Set `MAIL_MOCK=false` and fill in real SMTP details in `.env` to actually send mail.
 
 ### API reference
 
@@ -107,12 +115,14 @@ npm run lint    # eslint
 ## Known gaps before this is a real production deployment
 
 - No automated tests, CI, or error monitoring.
-- No password reset / email verification flow.
+- No email *verification* — forgot-password proves you control an inbox, but nothing checks the email is real at signup.
 - Session tokens live in `localStorage` (readable by injected scripts); production-grade auth would want httpOnly cookies instead.
-- No rate limiting on auth or write endpoints.
+- Rate limiting is in-memory, per-instance — fine for one server, not for a horizontally-scaled deployment (would need Redis or similar behind it).
 - `GET /reviews` returns everything with no pagination.
 - No Terms of Service / content policy — worth having before real users can be named in reviews.
 - No real hosting/domain/TLS — this is still local-only (`localhost:8080` / `localhost:3000`).
+- No Google/social sign-in — password-only for now by choice, to avoid the added complexity (nullable passwords, external OAuth client setup) until it's actually needed.
+- Landlord identity has no dedup/verification — "Sunrise Property Management" typed two different ways becomes two different profiles, silently fragmenting reviews.
 
 ## Project structure
 
@@ -120,6 +130,8 @@ npm run lint    # eslint
 src/main/java/org/acme/
 ├── AppUser.java                        # entity (accounts)
 ├── AuthToken.java                      # entity (session tokens)
+├── PasswordResetToken.java             # entity (single-use, 60-min reset tokens)
+├── RateLimiter.java                    # in-memory sliding-window limiter (CDI bean)
 ├── Landlord.java                       # entity
 ├── Property.java                       # entity
 ├── Review.java                         # entity

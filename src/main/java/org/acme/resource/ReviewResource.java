@@ -12,7 +12,9 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.transaction.Transactional;
+import jakarta.inject.Inject;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -23,6 +25,7 @@ import io.quarkus.panache.common.Sort;
 
 import org.acme.AppUser;
 import org.acme.AuthToken;
+import org.acme.RateLimiter;
 import org.acme.Review;
 import org.acme.ReviewVote;
 import org.acme.Property;
@@ -32,8 +35,11 @@ import org.acme.Landlord;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class ReviewResource {
-    
+
     private static final Logger LOG = Logger.getLogger(ReviewResource.class.getName());
+
+    @Inject
+    RateLimiter rateLimiter;
 
     @GET
     public List<Review> getReviews(@HeaderParam("Authorization") String authorizationHeader) {
@@ -62,6 +68,11 @@ public class ReviewResource {
             AppUser user = authenticate(authorizationHeader);
             if (user == null) {
                 return unauthorized();
+            }
+            if (!rateLimiter.tryAcquire("review-create:" + user.id, 10, Duration.ofHours(1))) {
+                return Response.status(429)
+                        .entity("{\"error\": \"Too many reviews submitted. Please try again later.\"}")
+                        .build();
             }
 
             if (review == null || review.property == null) {

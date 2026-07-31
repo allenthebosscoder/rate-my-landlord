@@ -35,7 +35,7 @@ type Review = {
   };
 };
 
-type Page = "view" | "add" | "auth" | "moderation";
+type Page = "view" | "add" | "auth" | "moderation" | "reset-password";
 
 type Auth = { token: string; username: string; isAdmin: boolean } | null;
 
@@ -227,11 +227,17 @@ export default function Home() {
   const username = auth?.username ?? null;
   const isAdmin = auth?.isAdmin ?? false;
 
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authMode, setAuthMode] = useState<"login" | "register" | "forgot">("login");
   const [authUsername, setAuthUsername] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
 
   const [currentPage, setCurrentPage] = useState<Page>("view");
   const [selectedLandlord, setSelectedLandlord] = useState<string | null>(null);
@@ -439,6 +445,18 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    // A password-reset email link lands here as /?resetToken=... — pick it
+    // up once on load and switch straight to the reset form.
+    const token = new URLSearchParams(window.location.search).get("resetToken");
+    if (!token) return;
+    // Syncing React state with the URL (an external system) on initial load.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setResetToken(token);
+    setCurrentPage("reset-password");
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
   function handleAuthFailure(status: number): boolean {
     if (status === 401) {
       setAuth(null);
@@ -644,6 +662,8 @@ export default function Home() {
     setEditingId(null);
     setSearchQuery("");
     setError("");
+    setAuthError("");
+    setAuthMessage("");
   }
 
   function startWritingReview() {
@@ -671,9 +691,15 @@ export default function Home() {
       setAuthError("Username and password are required");
       return;
     }
-    if (authMode === "register" && authPassword.length < 8) {
-      setAuthError("Password must be at least 8 characters");
-      return;
+    if (authMode === "register") {
+      if (!authEmail.trim()) {
+        setAuthError("Email is required");
+        return;
+      }
+      if (authPassword.length < 8) {
+        setAuthError("Password must be at least 8 characters");
+        return;
+      }
     }
 
     setAuthError("");
@@ -682,7 +708,11 @@ export default function Home() {
       const response = await fetch(`/api/auth/${authMode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: authUsername.trim(), password: authPassword }),
+        body: JSON.stringify({
+          username: authUsername.trim(),
+          email: authEmail.trim(),
+          password: authPassword,
+        }),
       });
       const data = await response.json().catch(() => null);
 
@@ -693,11 +723,86 @@ export default function Home() {
 
       setAuth({ token: data.token, username: data.username, isAdmin: Boolean(data.isAdmin) });
       setAuthUsername("");
+      setAuthEmail("");
       setAuthPassword("");
       goHome();
       loadReviews(data.token);
     } catch (err) {
       console.error("Auth error:", err);
+      setAuthError("Network error. Please try again.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function submitForgotPassword(e: React.FormEvent) {
+    e.preventDefault();
+
+    if (!authEmail.trim()) {
+      setAuthError("Email is required");
+      return;
+    }
+
+    setAuthError("");
+    setAuthMessage("");
+    setAuthLoading(true);
+    try {
+      const response = await fetch("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail.trim() }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setAuthError(data?.error || "Something went wrong. Please try again.");
+        return;
+      }
+
+      setAuthMessage(data?.message || "If that email has an account, a reset link is on its way.");
+    } catch (err) {
+      console.error("Forgot password error:", err);
+      setAuthError("Network error. Please try again.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function submitResetPassword(e: React.FormEvent) {
+    e.preventDefault();
+
+    if (newPassword.length < 8) {
+      setAuthError("Password must be at least 8 characters");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setAuthError("Passwords don't match");
+      return;
+    }
+
+    setAuthError("");
+    setAuthLoading(true);
+    try {
+      const response = await fetch("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: resetToken, newPassword }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setAuthError(data?.error || "Something went wrong. Please try again.");
+        return;
+      }
+
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setResetToken(null);
+      setAuthMode("login");
+      setAuthMessage("Password updated. Please sign in.");
+      setCurrentPage("auth");
+    } catch (err) {
+      console.error("Reset password error:", err);
       setAuthError("Network error. Please try again.");
     } finally {
       setAuthLoading(false);
@@ -1748,62 +1853,115 @@ export default function Home() {
         </div>
       )}
 
-      {/* Sign In / Sign Up Page */}
+      {/* Sign In / Sign Up / Forgot Password Page */}
       {currentPage === "auth" && (
         <div className="max-w-md mx-auto px-4 py-16">
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-8">
             <h2 className="text-2xl font-bold mb-1">
-              {authMode === "login" ? "Sign In" : "Create an Account"}
+              {authMode === "login"
+                ? "Sign In"
+                : authMode === "register"
+                ? "Create an Account"
+                : "Reset Password"}
             </h2>
             <p className="text-sm text-gray-600 mb-6">
               {authMode === "login"
                 ? "Sign in to write and manage your reviews."
-                : "Sign up to start writing reviews."}
+                : authMode === "register"
+                ? "Sign up to start writing reviews."
+                : "Enter your email and we'll send you a reset link."}
             </p>
 
-            <form onSubmit={submitAuth} className="space-y-4">
+            {authMessage && (
+              <div className="bg-green-50 border border-green-300 text-green-700 px-4 py-3 rounded text-sm mb-4">
+                {authMessage}
+              </div>
+            )}
+
+            <form
+              onSubmit={authMode === "forgot" ? submitForgotPassword : submitAuth}
+              className="space-y-4"
+            >
               {authError && (
                 <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded text-sm">
                   {authError}
                 </div>
               )}
 
-              <div>
-                <label className="block text-sm font-medium mb-2">Username</label>
-                <input
-                  type="text"
-                  value={authUsername}
-                  onChange={(e) => setAuthUsername(e.target.value)}
-                  autoComplete="username"
-                  className="border p-2 w-full rounded"
-                />
-              </div>
+              {authMode !== "forgot" && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">Username</label>
+                  <input
+                    type="text"
+                    value={authUsername}
+                    onChange={(e) => setAuthUsername(e.target.value)}
+                    autoComplete="username"
+                    className="border p-2 w-full rounded"
+                  />
+                </div>
+              )}
 
-              <div>
-                <label className="block text-sm font-medium mb-2">Password</label>
-                <input
-                  type="password"
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
-                  className="border p-2 w-full rounded"
-                />
-                {authMode === "register" && (
-                  <p className="text-xs text-gray-500 mt-1">At least 8 characters.</p>
-                )}
-              </div>
+              {(authMode === "register" || authMode === "forgot") && (
+                <div>
+                  <label className="block text-sm font-medium mb-2">Email</label>
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    autoComplete="email"
+                    className="border p-2 w-full rounded"
+                  />
+                </div>
+              )}
+
+              {authMode !== "forgot" && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium">Password</label>
+                    {authMode === "login" && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthMode("forgot");
+                          setAuthError("");
+                          setAuthMessage("");
+                        }}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                      >
+                        Forgot password?
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                    className="border p-2 w-full rounded"
+                  />
+                  {authMode === "register" && (
+                    <p className="text-xs text-gray-500 mt-1">At least 8 characters.</p>
+                  )}
+                </div>
+              )}
 
               <button
                 type="submit"
                 disabled={authLoading}
                 className="w-full px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50"
               >
-                {authLoading ? "Please wait..." : authMode === "login" ? "Sign In" : "Sign Up"}
+                {authLoading
+                  ? "Please wait..."
+                  : authMode === "login"
+                  ? "Sign In"
+                  : authMode === "register"
+                  ? "Sign Up"
+                  : "Send Reset Link"}
               </button>
             </form>
 
             <p className="text-sm text-gray-600 mt-6 text-center">
-              {authMode === "login" ? (
+              {authMode === "login" && (
                 <>
                   Don&apos;t have an account?{" "}
                   <button
@@ -1811,13 +1969,15 @@ export default function Home() {
                     onClick={() => {
                       setAuthMode("register");
                       setAuthError("");
+                      setAuthMessage("");
                     }}
                     className="text-blue-600 hover:text-blue-700 font-medium"
                   >
                     Sign up
                   </button>
                 </>
-              ) : (
+              )}
+              {authMode === "register" && (
                 <>
                   Already have an account?{" "}
                   <button
@@ -1825,6 +1985,7 @@ export default function Home() {
                     onClick={() => {
                       setAuthMode("login");
                       setAuthError("");
+                      setAuthMessage("");
                     }}
                     className="text-blue-600 hover:text-blue-700 font-medium"
                   >
@@ -1832,7 +1993,69 @@ export default function Home() {
                   </button>
                 </>
               )}
+              {authMode === "forgot" && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthError("");
+                    setAuthMessage("");
+                  }}
+                  className="text-blue-600 hover:text-blue-700 font-medium"
+                >
+                  ← Back to sign in
+                </button>
+              )}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Password Page (from an emailed reset link) */}
+      {currentPage === "reset-password" && (
+        <div className="max-w-md mx-auto px-4 py-16">
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-8">
+            <h2 className="text-2xl font-bold mb-1">Set a New Password</h2>
+            <p className="text-sm text-gray-600 mb-6">Choose a new password for your account.</p>
+
+            <form onSubmit={submitResetPassword} className="space-y-4">
+              {authError && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded text-sm">
+                  {authError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium mb-2">New Password</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                  className="border p-2 w-full rounded"
+                />
+                <p className="text-xs text-gray-500 mt-1">At least 8 characters.</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Confirm Password</label>
+                <input
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                  className="border p-2 w-full rounded"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50"
+              >
+                {authLoading ? "Please wait..." : "Update Password"}
+              </button>
+            </form>
           </div>
         </div>
       )}

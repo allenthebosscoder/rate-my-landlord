@@ -15,6 +15,12 @@ public class AppUser extends PanacheEntity {
     @Column(unique = true)
     public String username;
 
+    // Nullable: accounts created before this field existed won't have one.
+    // Required going forward (enforced in AuthResource, not here) since
+    // password reset depends on it.
+    @Column(unique = true)
+    public String email;
+
     @JsonIgnore
     public String passwordHash;
 
